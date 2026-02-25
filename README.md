@@ -1,176 +1,124 @@
-# VetorEco v0.1.0 (MVP pronto para GitHub)
+# VetorEco (Cloudflare-first SaaS)
 
-MVP de SaaS para arquitetos/engenheiros organizarem **enquadramento regulatório**, **checklist técnico**, **inputs de pré-cálculo** e **documentação preliminar** de eficiência energética de edificações (com foco no fluxo de conformidade associado às exigências que entram em vigor nos próximos anos).
+MVP funcional para **triagem e compliance operacional** de eficiência energética (PBE Edifica), com foco em:
 
-## Proposta do SaaS
+- autenticação + sessão
+- multi-tenant (organizations/workspaces)
+- projetos
+- checklist de triagem
+- contexto regulatório (INI / RTQ legado)
+- inputs técnicos
+- pré-cálculo auditável (heurístico MVP)
+- memorial e dossiê em **HTML/JSON-first**
+- **exportação PDF do memorial (implementada via `pdf-lib`)**
+- admin de pacotes/regras normativas (CRUD)
+- golden cases (seed + endpoint de gestão)
+- auditoria e versionamento de projeto
 
-O VetorEco nasce para resolver o problema prático do escritório:
-- entender **quando** a exigência passa a valer para cada projeto (porte do município, ente público/privado, data do processo),
-- evitar retrabalho com **checklist técnico guiado**,
-- consolidar **inputs canônicos** para cálculo,
-- registrar **versões e trilha de auditoria**,
-- gerar **memorial** e **dossiê operacional** em HTML/JSON,
-- manter um motor **versionado** (INI-first, RTQ legado apenas para transição).
+## Stack
 
-## O que esta versão já entrega
+- **Frontend:** React + Vite
+- **API:** Hono (Cloudflare Workers)
+- **Banco:** Cloudflare D1 (SQLite)
+- **PDF:** `pdf-lib` (geração nativa no edge)
+- **Testes:** Vitest
 
-### Front-end (React + Vite)
-- Login/cadastro básico
-- CRUD de projetos
-- Tela única de operação com blocos:
-  1. Projeto
-  2. Enquadramento legal (contexto regulatório)
-  3. Checklist técnico por tipologia
-  4. Inputs técnicos canônicos
-  5. Pré-cálculo + histórico de execuções
-- Abertura de Memorial e Dossiê em **HTML** ou **JSON**
-- Exibição dos pacotes normativos carregados no banco (somente leitura)
+## Estrutura
 
-### Back-end (Cloudflare Workers + Hono)
-- Auth básica (senha com PBKDF2 + sessão em cookie HttpOnly)
-- Rotas protegidas por sessão
-- Auditoria (`audit_logs`) com `requestId`
-- Versionamento de snapshots do projeto (`project_versions`)
-- `project_regulatory_context` com método `INI` / `RTQ_LEGADO`
-- Motor de enquadramento legal versionado (INI-first)
-- Validação de inputs técnicos por tipologia
-- Pipeline canônico de pré-cálculo com persistência em `calculation_runs`
-- Geração de Memorial e Dossiê (HTML/JSON)
-- Rota de PDF explícita com `NOT_IMPLEMENTED` (estratégia HTML/JSON-first)
+- `apps/api` → API Worker + módulos de domínio + testes
+- `apps/web` → Interface React do MVP
+- `apps/api/db/schema.sql` → schema D1
+- `apps/api/db/seed.sql` → seed normativo inicial
+- `apps/api/db/seed_003_golden_cases.sql` → seed dos golden cases oficiais curados
+- `docs/golden-cases/` → relatório PDF + análise + JSON extraído
 
-### Banco de dados (Cloudflare D1)
-Schema inclui tabelas operacionais e de evolução normativa:
-- `users`, `sessions`
-- `projects`, `project_regulatory_context`
-- `project_checklist_items`, `project_versions`, `audit_logs`
-- `normative_packages`, `normative_rules`
-- `calculation_profiles`, `calculation_coefficients`
-- `calculation_runs`
-- `golden_case_results`
+## Rodar localmente
 
-## Estrutura do código
+> Requer Node 20+ e Cloudflare Wrangler configurado.
 
-```text
-vetoreco-v01/
-  apps/
-    api/
-      src/
-        index.ts                     # Rotas principais Hono
-        db.ts                        # audit + helpers de snapshot/ownership
-        utils.ts                     # hash, cookies, erros, helpers
-        modules/
-          auth/session.ts            # cadastro/login/logout + middleware requireAuth
-          checklist/
-            templates.ts             # checklist por tipologia
-            risk.ts                  # cálculo de risco/progresso
-          regulatory/
-            engine.ts                # contexto + enquadramento legal versionado
-            seed.ts                  # seed de pacotes/regras normativas no D1
-          technical/inputs.ts        # inputs canônicos + validação
-          calculation/pipeline.ts    # pré-cálculo canônico auditável
-          documents/render.ts        # memorial/dossiê HTML/JSON
-      test/                         # testes unitários (Vitest) + scaffold integração
-      wrangler.jsonc                # binding D1 + vars
-    web/
-      src/
-        App.tsx                     # UI do MVP
-        api.ts                      # helper fetch
-        styles.css                  # estilos básicos
-  db/schema.sql                     # schema completo do D1
-```
+1. Instale dependências:
+   - `npm install`
 
-## Rotas principais (API)
+2. Crie/ligue o D1 no `wrangler.jsonc` e aplique schema + seeds (base + térmico + golden cases):
+   - `wrangler d1 execute vetoreco-db --file=apps/api/db/schema.sql`
+   - `wrangler d1 execute vetoreco-db --file=apps/api/db/seed.sql`
+   - `wrangler d1 execute vetoreco-db --file=apps/api/db/migration_002_thermal.sql`
+   - `wrangler d1 execute vetoreco-db --file=apps/api/db/seed_002_thermal.sql`
 
-### Auth
-- `POST /auth/register`
-- `POST /auth/login`
-- `POST /auth/logout`
-- `GET /auth/me`
+3. Suba a API:
+   - `npm run dev:api`
 
-### Projetos e fluxo técnico
-- `GET/POST /projects`
-- `GET/PUT/DELETE /projects/:id`
-- `GET/PUT /projects/:id/checklist`
-- `GET /projects/:id/risk`
-- `GET/PUT /projects/:id/regulatory-context`
-- `GET /projects/:id/legal-framing`
-- `GET/PUT /projects/:id/technical-inputs`
-- `POST /projects/:id/calculation/run`
-- `GET /projects/:id/calculation/runs`
-- `GET /projects/:id/calculation/latest`
-- `GET /projects/:id/memorial?format=json|html`
-- `GET /projects/:id/dossier?format=json|html`
-- `GET /projects/:id/memorial.pdf` (retorna `NOT_IMPLEMENTED`)
-- `POST /projects/demo`
+4. Suba o frontend:
+   - `npm run dev:web`
 
-### Normativos (somente leitura por enquanto)
-- `GET /normatives/packages`
-- `GET /normatives/rules`
+Frontend usa proxy `/api` → `wrangler dev` local.
 
-## Como rodar localmente
+## Fluxo recomendado no MVP
 
-### 1) Instalar dependências
-```bash
-npm install
-```
+1. Cadastre/login
+2. Crie um projeto (ou use **Projeto Demo**)
+3. Ajuste checklist, contexto regulatório e inputs técnicos
+4. Rode **pré-cálculo**
+5. Abra:
+   - Memorial JSON/HTML
+   - **Memorial PDF**
+   - Dossiê operacional
 
-### 2) Criar o banco D1 e aplicar schema
-```bash
-cd apps/api
-npx wrangler d1 create vetoreco
-# copie o database_id para apps/api/wrangler.jsonc
-npx wrangler d1 execute vetoreco --local --file=../../db/schema.sql
-```
+## Observações do MVP
 
-### 3) Rodar API e Front
-Terminal 1:
-```bash
-npm run dev:api
-```
+- O motor de cálculo ainda é **heurístico auditável** (pré-cálculo), pronto para evoluir para cobertura normativa P1/P2.
+- O PDF já está implementado (texto estruturado em A4 via `pdf-lib`), sem depender de headless browser.
+- O admin normativo agora suporta **CRUD** de pacotes e regras.
+- Golden cases estão preparados no banco/endpoints para validação progressiva.
 
-Terminal 2:
-```bash
-npm run dev:web
-```
+## Próximos passos sugeridos
 
-## Testes
+1. Cobertura normativa completa P1/P2 (por tipologia)
+2. Golden cases reais validados por especialista
+3. Template PDF visual avançado (layout institucional)
+4. RBAC refinado por papel (owner/admin/member)
+5. Assinatura e trilha de aprovação de memorial
 
-Foram incluídos testes unitários de:
-- motor regulatório
-- validação de inputs técnicos
-- pipeline de pré-cálculo
 
-Rodar:
-```bash
-npm --workspace apps/api exec vitest run
-```
+## Novidades da versão 0.4.2
 
-> Observação: existe também um `auth.integration.test.ts` em scaffold (skip) para você completar com D1 local/miniflare quando quiser validar fluxo completo de auth + rotas protegidas.
+- **Motor térmico rápido no frontend** (RTQ-R / RTQ-C / NBR 15575): formulário único para salvar envelope, janelas, iluminação e HVAC e rodar cálculo.
+- **Persistência térmica no D1** usando as tabelas da migration 002 (paredes, coberturas, janelas, iluminação, HVAC, cálculos e checks).
+- **Endpoints de catálogo térmico**: zonas bioclimáticas, materiais e municípios.
+- **Pré-cálculo integrado ao térmico**: se já existir cálculo térmico ele é anexado ao pré-cálculo; se houver dados térmicos salvos e ainda não houver cálculo, a API tenta rodar automaticamente em modo `auto`.
+- **Memorial e dossiê enriquecidos** com seção de resultado térmico complementar.
+- **Golden cases (admin)**:
+  - `POST /admin/golden-cases/import` para importar casos em lote (JSON)
+  - `POST /admin/golden-cases/run` para validar casos existentes e gerar relatório de acerto/erro
 
-## Limitações atuais desta versão (transparentes)
+## Observações importantes
 
-- **Cálculo normativo ainda parcial**: o pipeline é canônico, auditável e útil para pré-avaliação, mas não cobre integralmente todas as fórmulas/casos normativos P1/P2.
-- **PDF final não implementado** nesta etapa (rota retorna `NOT_IMPLEMENTED`). A estratégia atual é HTML/JSON-first.
-- **Normativos admin** ainda estão em **read-only** (sem CRUD de pacotes/regras via UI/API).
-- **Engine regulatória** é um MVP operacional com regras versionadas simplificadas; precisa de consolidação jurídica completa antes de uso em produção regulada.
+- Para o módulo térmico funcionar, a migration/seed térmica (`migration_002_thermal.sql` + `seed_002_thermal.sql`) precisa ser aplicada no D1.
+- O PDF do memorial já é gerado no backend (via `pdf-lib`) e continua disponível na rota `/projects/:id/memorial.pdf`.
+- Os **golden cases normativos completos** ainda dependem da sua pesquisa/curadoria (entradas e resultados oficiais). A infraestrutura para importar e rodar já está pronta.
 
-## Próximos passos sugeridos (v0.2+)
 
-1. Completar cálculo normativo formal por tipologia (P1/P2 completos)
-2. Exportar PDF (Workers + HTML renderer ou serviço dedicado)
-3. CRUD admin para pacotes normativos e regras
-4. Gestão de times/escritórios (multiusuário)
-5. Templates de memorial por prefeitura/OIA
-6. Assinatura/planos e limites por projeto
+## Correções da versão 0.4.2
 
-## Sugestões de commit (já pensando no seu padrão)
+- Corrigido o pipeline do cálculo térmico rápido para usar as assinaturas canônicas de `calculateRTQR` e `calculateRTQC` (evita erro de runtime ao rodar RTQ-R/RTQ-C).
+- Ajustado o cálculo automático do parâmetro AVS (estimativa a partir de sombreamento/janelas) e o particionamento de áreas permanentes/transitórias no RTQ-R.
+- Pré-cálculo agora pode disparar cálculo térmico automaticamente quando há dados térmicos salvos mas ainda não existe rodada térmica persistida.
 
-Como você gosta de commits por pasta, eu faria assim:
+## Novidades da versão 0.4.2
 
-- **apps/api** → `feat(api): add regulatory framing, technical inputs, and auditable pre-calc pipeline`
-- **apps/web** → `feat(web): add mvp workspace for legal framing checklist and pre-calc`
-- **db** → `feat(db): add normative versioning and calculation run schema`
-- **root/docs** → `docs: update readme for vetoreco v0.1.0 setup and architecture`
+- **Curadoria de golden cases PBE Edifica incorporada ao projeto** (5 casos oficiais consolidados em JSON + seed SQL para D1).
+- **Tabela `golden_case_results` enriquecida** com metadados de curadoria (`source_url`, normativa, tipologia, ZB, qualidade, completude).
+- **Importador admin de golden cases atualizado** para aceitar o **formato do relatório** (normative + technical_inputs + expected_results) além do formato legado.
+- **Runner de golden cases com status `SKIPPED`** para casos de referência já importados cuja execução normativa completa ainda depende do motor (evita falso positivo e mantém rastreabilidade).
+- **Documentação interna adicionada** em `docs/golden-cases/` com PDF original, JSON extraído e análise.
 
----
-Se quiser, no próximo passo eu posso te entregar um **checklist exato de publicação no GitHub + Cloudflare** (ordem dos comandos, bindings, secrets e deploy), já no formato que você vai executar.
+## Como usar os golden cases curados
+
+1. Aplicar o seed: `apps/api/db/seed_003_golden_cases.sql`
+2. Acessar `POST /admin/golden-cases/run`
+3. Ler o resumo:
+   - `supportedTotal`: casos que o runner consegue executar hoje
+   - `skipped`: casos já armazenados, aguardando motor normativo
+   - `failed`: casos executados com divergência
+
+> Observação: os 5 casos oficiais da curadoria entram como **referência auditável**; eles passam a virar regressão automática real à medida que os motores normativos completos forem sendo implementados.

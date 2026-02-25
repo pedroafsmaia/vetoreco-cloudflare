@@ -2,15 +2,16 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vetoreco-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-02-25",
+  "compatibility_date": "2025-01-15",
   "vars": {
-    "APP_ORIGIN": "http://localhost:5173"
+    "APP_ORIGIN": "http://localhost:5173",
+    "ENABLE_PDF": "true"
   },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "vetoreco",
-      "database_id": "CHANGE-ME"
+      "database_name": "vetoreco-db",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
   ]
 }

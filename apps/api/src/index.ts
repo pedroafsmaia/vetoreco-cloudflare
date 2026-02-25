@@ -1,485 +1,854 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { audit, getOwnedProject, snapshotProject } from './db';
-import type { HonoEnv } from './types';
-import { HttpError, assert, jsonErr, jsonOk, nowIso, randomId, safeJsonParse } from './utils';
-import { login, logout, register, requireAuth } from './modules/auth/session';
-import { ensureNormativeSeed } from './modules/regulatory/seed';
-import { evaluateLegalFraming, normalizeRegulatoryContext } from './modules/regulatory/engine';
-import { getChecklistTemplate } from './modules/checklist/templates';
-import { computeRisk } from './modules/checklist/risk';
-import { normalizeTechnicalInputs, validateTechnicalInputs } from './modules/technical/inputs';
-import { runPreCalculation } from './modules/calculation/pipeline';
-import { buildDossier, buildMemorial } from './modules/documents/render';
+import type {
+  Bindings,
+  CalculationRunRecord,
+  MunicipalityBand,
+  ProjectRow,
+  PublicEntityLevel,
+  RegulatoryContextRow,
+  Typology,
+  Variables
+} from './types';
+import { cookieSerialize, getBody, hashPassword, jsonErr, jsonOk, nowIso, parseCookie, sanitizeSlug, sha256Hex, verifyPassword } from './utils';
+import { createD1Repo, type Repo } from './repo';
+import { createInMemoryRepo } from './testing/inMemoryRepo';
+import { computeChecklistSummary, getChecklistTemplate } from './modules/checklist';
+import { resolveLegalFraming } from './modules/regulatory';
+import { normalizeTechnicalInputs, validateTechnicalInputs } from './modules/technical';
+import { runPreCalculation } from './modules/calculation';
+import { buildDossierDocument, buildMemorialDocument } from './modules/documents';
+import { calculateProjectThermal, getLatestProjectThermalCalculation, getProjectThermalQuick, listThermalMaterials, listThermalZones, saveProjectThermalQuick, searchMunicipalities } from './modules/thermalProject';
+import { runGoldenCases } from './modules/goldenCases';
+import { buildSimplePdfFromText } from './pdf';
 
-const app = new Hono<HonoEnv>();
-let seedOnce: Promise<any> | null = null;
+const SESSION_DAYS = 14;
+const loginAttempts = new Map<string, number[]>();
 
-async function ensureSeed(c: any) {
-  if (!seedOnce) seedOnce = ensureNormativeSeed(c.env.DB);
-  await seedOnce;
+type AppCtx = { Bindings: Bindings; Variables: Variables };
+type AppFactoryOpts = { repo?: Repo };
+
+async function audit(c: any, action: string, details?: unknown, projectId?: string) {
+  const repo = c.get('repo') as Repo;
+  await repo.insertAuditLog({
+    userId: c.get('userId') || null,
+    projectId: projectId || null,
+    action,
+    details,
+    requestId: c.get('requestId')
+  });
 }
 
-app.use('*', async (c, next) => {
-  c.set('requestId', crypto.randomUUID());
-  await ensureSeed(c);
-  return cors({
-    origin: (origin) => (!origin || origin === c.env.APP_ORIGIN ? origin || c.env.APP_ORIGIN : ''),
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type'],
-    credentials: true,
-  })(c, next);
-});
+function responseOk(c: any, data: any, status = 200) {
+  return c.json(jsonOk(c.get('requestId'), data), status);
+}
+function responseErr(c: any, message: string, code = 'BAD_REQUEST', status = 400, details?: unknown) {
+  return c.json(jsonErr(c.get('requestId'), message, code, details), status);
+}
 
-app.onError((err, c) => {
-  const requestId = c.get('requestId');
-  if (err instanceof HttpError) {
-    return c.json(jsonErr(err.message, err.code, err.details, requestId), err.status);
+async function resolveMembership(c: any) {
+  const repo = c.get('repo') as Repo;
+  const orgs = await repo.listOrganizationsForUser(c.get('userId'));
+  if (!orgs.length) return null;
+  const requested = c.req.header('X-Organization-Id') || c.req.query('orgId');
+  const chosen = requested ? orgs.find((o) => o.id === requested) : orgs[0];
+  if (!chosen) return null;
+  c.set('organizationId', chosen.id);
+  return chosen;
+}
+
+async function requireAuth(c: any, next: any) {
+  const repo = c.get('repo') as Repo;
+  const token = parseCookie(c.req.header('Cookie')).vetoreco_session;
+  if (!token) return responseErr(c, 'Não autenticado', 'UNAUTHORIZED', 401);
+  const session = await repo.getSessionByTokenHash(await sha256Hex(token));
+  if (!session) return responseErr(c, 'Sessão inválida', 'UNAUTHORIZED', 401);
+  if (new Date(session.expires_at).getTime() < Date.now()) {
+    await repo.deleteSession(session.session_id);
+    return responseErr(c, 'Sessão expirada', 'UNAUTHORIZED', 401);
   }
-  console.error(JSON.stringify({ requestId, message: (err as Error).message, stack: (err as Error).stack }));
-  return c.json(jsonErr('Erro interno', 'INTERNAL_ERROR', undefined, requestId), 500);
-});
+  const user = await repo.getUserById(session.user_id);
+  if (!user) return responseErr(c, 'Usuário não encontrado', 'UNAUTHORIZED', 401);
 
-app.get('/health', (c) => c.json(jsonOk({ status: 'ok', time: nowIso(), service: 'vetoreco-api' }, c.get('requestId'))));
-app.get('/version', (c) => c.json(jsonOk({ version: '0.1.0', channel: 'v2.1-tech-preview' }, c.get('requestId'))));
-
-app.post('/auth/register', async (c) => c.json(jsonOk(await register(c), c.get('requestId'))));
-app.post('/auth/login', async (c) => c.json(jsonOk(await login(c), c.get('requestId'))));
-app.post('/auth/logout', requireAuth, async (c) => c.json(jsonOk(await logout(c), c.get('requestId'))));
-app.get('/auth/me', requireAuth, async (c) => {
-  const user = await c.env.DB.prepare(`SELECT id,email,created_at FROM users WHERE id=?`).bind(c.get('userId')).first<any>();
-  return c.json(jsonOk({ user }, c.get('requestId')));
-});
-
-app.use('/projects', requireAuth);
-app.use('/projects/*', requireAuth);
-
-app.get('/projects', async (c) => {
-  const rows = await c.env.DB.prepare(`SELECT * FROM projects WHERE user_id=? ORDER BY updated_at DESC`).bind(c.get('userId')).all<any>();
-  return c.json(jsonOk({ projects: rows.results || [] }, c.get('requestId')));
-});
-
-app.post('/projects', async (c) => {
-  const b = await c.req.json<any>().catch(() => ({}));
-  assert(b.name, 400, 'VALIDATION_ERROR', 'Nome do projeto é obrigatório');
-  const ts = nowIso();
-  const id = randomId();
-  const row = {
-    id,
-    user_id: c.get('userId'),
-    name: String(b.name).trim(),
-    city: String(b.city || ''),
-    state: String(b.state || '').toUpperCase(),
-    municipality_size: b.municipality_size || 'large',
-    typology: b.typology || 'residencial',
-    phase: b.phase || 'anteprojeto',
-    protocol_year: Number(b.protocol_year || new Date().getFullYear()),
-    area_m2: b.area_m2 ? Number(b.area_m2) : null,
-    is_federal_public: b.is_federal_public ? 1 : 0,
-    notes: String(b.notes || ''),
-    technical_inputs_json: JSON.stringify({}),
-    technical_inputs_updated_at: null,
-    created_at: ts,
-    updated_at: ts,
-  };
-  await c.env.DB.prepare(
-    `INSERT INTO projects (id,user_id,name,city,state,municipality_size,typology,phase,protocol_year,area_m2,is_federal_public,notes,technical_inputs_json,technical_inputs_updated_at,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  )
-    .bind(
-      row.id,
-      row.user_id,
-      row.name,
-      row.city,
-      row.state,
-      row.municipality_size,
-      row.typology,
-      row.phase,
-      row.protocol_year,
-      row.area_m2,
-      row.is_federal_public,
-      row.notes,
-      row.technical_inputs_json,
-      row.technical_inputs_updated_at,
-      row.created_at,
-      row.updated_at,
-    )
-    .run();
-
-  const defaultContext = normalizeRegulatoryContext({}, row);
-  await c.env.DB.prepare(
-    `INSERT INTO project_regulatory_context (id,project_id,protocol_date,permit_issue_date,public_bid_date,population_band,entity_scope,classification_method,legacy_reason,evidence_ence_projeto_legacy,state_code,autodeclaration_requested,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  )
-    .bind(
-      randomId(),
-      id,
-      defaultContext.protocol_date,
-      defaultContext.permit_issue_date,
-      defaultContext.public_bid_date,
-      defaultContext.population_band,
-      defaultContext.entity_scope,
-      defaultContext.classification_method,
-      defaultContext.legacy_reason,
-      defaultContext.evidence_ence_projeto_legacy,
-      defaultContext.state_code,
-      defaultContext.autodeclaration_requested ? 1 : 0,
-      ts,
-    )
-    .run();
-
-  await audit(c, 'projects.create', { name: row.name }, id);
-  return c.json(jsonOk({ project: row }, c.get('requestId')));
-});
-
-app.get('/projects/:id', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  return c.json(jsonOk({ project }, c.get('requestId')));
-});
-
-app.put('/projects/:id', async (c) => {
-  const projectId = c.req.param('id');
-  const project = await getOwnedProject(c, projectId);
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const b = await c.req.json<any>().catch(() => ({}));
-  const updated = {
-    ...project,
-    name: String(b.name ?? project.name),
-    city: String(b.city ?? project.city ?? ''),
-    state: String(b.state ?? project.state ?? '').toUpperCase(),
-    municipality_size: b.municipality_size ?? project.municipality_size,
-    typology: b.typology ?? project.typology,
-    phase: b.phase ?? project.phase,
-    protocol_year: Number(b.protocol_year ?? project.protocol_year),
-    area_m2: b.area_m2 === '' ? null : Number(b.area_m2 ?? project.area_m2),
-    is_federal_public: b.is_federal_public ? 1 : 0,
-    notes: String(b.notes ?? project.notes ?? ''),
-    updated_at: nowIso(),
-  };
-
-  await c.env.DB.prepare(
-    `UPDATE projects SET name=?,city=?,state=?,municipality_size=?,typology=?,phase=?,protocol_year=?,area_m2=?,is_federal_public=?,notes=?,updated_at=? WHERE id=? AND user_id=?`,
-  )
-    .bind(
-      updated.name,
-      updated.city,
-      updated.state,
-      updated.municipality_size,
-      updated.typology,
-      updated.phase,
-      updated.protocol_year,
-      updated.area_m2,
-      updated.is_federal_public,
-      updated.notes,
-      updated.updated_at,
-      projectId,
-      c.get('userId'),
-    )
-    .run();
-
-  await snapshotProject(c, projectId, updated, 'project');
-  await audit(c, 'projects.update', { fields: Object.keys(b) }, projectId);
-  return c.json(jsonOk({ project: updated }, c.get('requestId')));
-});
-
-app.delete('/projects/:id', async (c) => {
-  const projectId = c.req.param('id');
-  const project = await getOwnedProject(c, projectId);
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  await c.env.DB.prepare(`DELETE FROM projects WHERE id=? AND user_id=?`).bind(projectId, c.get('userId')).run();
-  await audit(c, 'projects.delete', { projectId }, projectId);
-  return c.json(jsonOk({}, c.get('requestId')));
-});
-
-async function getCheckedKeys(c: any, projectId: string) {
-  const rows = await c.env.DB.prepare(`SELECT item_key FROM project_checklist_items WHERE project_id=? AND checked=1`).bind(projectId).all<any>();
-  return (rows.results || []).map((r: any) => String(r.item_key));
+  c.set('userId', user.id);
+  c.set('sessionId', session.session_id);
+  c.set('isSuperAdmin', !!user.is_super_admin);
+  await repo.touchSession(session.session_id, nowIso());
+  const membership = await resolveMembership(c);
+  if (!membership) return responseErr(c, 'Usuário sem organização vinculada', 'UNAUTHORIZED', 401);
+  return next();
 }
 
-app.get('/projects/:id/checklist', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const template = getChecklistTemplate(project.typology);
-  const rows = await c.env.DB.prepare(`SELECT item_key,checked FROM project_checklist_items WHERE project_id=?`).bind(project.id).all<any>();
-  const map = new Map((rows.results || []).map((r: any) => [r.item_key, Boolean(r.checked)]));
-  const items = template.map((t) => ({ ...t, checked: map.get(t.key) ?? false }));
-  return c.json(jsonOk({ items }, c.get('requestId')));
-});
-
-app.put('/projects/:id/checklist', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const body = await c.req.json<any>().catch(() => ({}));
-  const items = Array.isArray(body.items) ? body.items : [];
-  const ts = nowIso();
-  for (const item of items) {
-    await c.env.DB.prepare(
-      `INSERT INTO project_checklist_items (id,project_id,item_key,checked,updated_at) VALUES (?,?,?,?,?)
-       ON CONFLICT(project_id,item_key) DO UPDATE SET checked=excluded.checked, updated_at=excluded.updated_at`,
-    )
-      .bind(randomId(), project.id, String(item.key), item.checked ? 1 : 0, ts)
-      .run();
-  }
-  await c.env.DB.prepare(`UPDATE projects SET updated_at=? WHERE id=?`).bind(ts, project.id).run();
-  await audit(c, 'checklist.update', { count: items.length }, project.id);
-  return c.json(jsonOk({ ok: true }, c.get('requestId')));
-});
-
-app.get('/projects/:id/risk', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const checked = await getCheckedKeys(c, project.id);
-  return c.json(jsonOk({ risk: computeRisk(project.typology, checked) }, c.get('requestId')));
-});
-
-async function getRegContext(c: any, project: any) {
-  const raw = await c.env.DB.prepare(`SELECT * FROM project_regulatory_context WHERE project_id=?`).bind(project.id).first<any>();
-  return normalizeRegulatoryContext(
-    {
-      protocol_date: raw?.protocol_date,
-      permit_issue_date: raw?.permit_issue_date,
-      public_bid_date: raw?.public_bid_date,
-      population_band: raw?.population_band,
-      entity_scope: raw?.entity_scope,
-      classification_method: raw?.classification_method,
-      legacy_reason: raw?.legacy_reason,
-      evidence_ence_projeto_legacy: raw?.evidence_ence_projeto_legacy,
-      state_code: raw?.state_code,
-      autodeclaration_requested: Boolean(raw?.autodeclaration_requested),
-    },
-    project,
-  );
+function requireSuperAdmin(c: any) {
+  if (!c.get('isSuperAdmin')) return responseErr(c, 'Acesso restrito a super-admin', 'FORBIDDEN', 403);
+  return null;
 }
 
-app.get('/projects/:id/regulatory-context', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const context = await getRegContext(c, project);
-  return c.json(jsonOk({ context }, c.get('requestId')));
-});
+async function getProjectOr404(c: any): Promise<ProjectRow | null> {
+  const repo = c.get('repo') as Repo;
+  const project = await repo.getProject(c.req.param('id'), c.get('organizationId'));
+  if (!project) return null;
+  return project;
+}
 
-app.put('/projects/:id/regulatory-context', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const body = await c.req.json<any>().catch(() => ({}));
-  const ctx = normalizeRegulatoryContext(body, project);
-  const ts = nowIso();
-  await c.env.DB.prepare(
-    `INSERT INTO project_regulatory_context (id,project_id,protocol_date,permit_issue_date,public_bid_date,population_band,entity_scope,classification_method,legacy_reason,evidence_ence_projeto_legacy,state_code,autodeclaration_requested,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(project_id) DO UPDATE SET
-       protocol_date=excluded.protocol_date,
-       permit_issue_date=excluded.permit_issue_date,
-       public_bid_date=excluded.public_bid_date,
-       population_band=excluded.population_band,
-       entity_scope=excluded.entity_scope,
-       classification_method=excluded.classification_method,
-       legacy_reason=excluded.legacy_reason,
-       evidence_ence_projeto_legacy=excluded.evidence_ence_projeto_legacy,
-       state_code=excluded.state_code,
-       autodeclaration_requested=excluded.autodeclaration_requested,
-       updated_at=excluded.updated_at`,
-  )
-    .bind(
-      randomId(),
-      project.id,
-      ctx.protocol_date,
-      ctx.permit_issue_date,
-      ctx.public_bid_date,
-      ctx.population_band,
-      ctx.entity_scope,
-      ctx.classification_method,
-      ctx.legacy_reason,
-      ctx.evidence_ence_projeto_legacy,
-      ctx.state_code,
-      ctx.autodeclaration_requested ? 1 : 0,
-      ts,
-    )
-    .run();
+async function computeLiveFraming(repo: Repo, project: ProjectRow, context: RegulatoryContextRow | null) {
+  const protocolDate = context?.protocol_date || `${project.protocol_year}-01-01`;
+  const preferredMode = (context?.classification_method === 'RTQ_LEGADO') ? 'RTQ' : 'INI';
+  const normativePackage = await repo.getActiveNormativePackage(protocolDate, preferredMode) || await repo.getActiveNormativePackage(protocolDate);
+  const rules = normativePackage ? await repo.listNormativeRules(normativePackage.id) : [];
+  return resolveLegalFraming({ project, context, normativePackage, rules });
+}
 
-  await audit(c, 'regulatory_context.update', { method: ctx.classification_method, entity: ctx.entity_scope }, project.id);
-  return c.json(jsonOk({ context: ctx }, c.get('requestId')));
-});
 
-app.get('/projects/:id/legal-framing', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const context = await getRegContext(c, project);
-  const framing = evaluateLegalFraming(project, context);
-  return c.json(jsonOk({ framing }, c.get('requestId')));
-});
+function normalizeGoldenCaseImportItem(item: any, index: number, userId: string) {
+  const reportCaseId = String(item?.report_case_id || item?.case_id || '').trim();
+  const reportNormative = String(item?.normative || '').trim();
+  const isReportFormat = !!reportNormative && (item?.technical_inputs !== undefined || item?.expected_results !== undefined);
 
-app.get('/projects/:id/diagnosis', async (c) => {
-  // compat route
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const context = await getRegContext(c, project);
-  const framing = evaluateLegalFraming(project, context);
-  return c.json(jsonOk({ diagnosis: framing, badge: framing.ruleMode === 'INI_FIRST' ? 'Motor versionado (INI-first)' : 'RTQ legado (transição)' }, c.get('requestId')));
-});
-
-app.get('/projects/:id/technical-inputs', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const inputs = normalizeTechnicalInputs(safeJsonParse(project.technical_inputs_json, {}));
-  const validation = validateTechnicalInputs(inputs, project.typology);
-  return c.json(jsonOk({ inputs, validation }, c.get('requestId')));
-});
-
-app.put('/projects/:id/technical-inputs', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const body = await c.req.json<any>().catch(() => ({}));
-  const inputs = normalizeTechnicalInputs(body);
-  const validation = validateTechnicalInputs(inputs, project.typology);
-  const ts = nowIso();
-  await c.env.DB.prepare(`UPDATE projects SET technical_inputs_json=?, technical_inputs_updated_at=?, updated_at=? WHERE id=? AND user_id=?`)
-    .bind(JSON.stringify(inputs), ts, ts, project.id, c.get('userId'))
-    .run();
-  await snapshotProject(c, project.id, { type: 'technical-inputs', inputs, validation }, 'technical');
-  await audit(c, 'technical_inputs.update', { coverage: validation.coverage, valid: validation.valid }, project.id);
-  return c.json(jsonOk({ inputs, validation }, c.get('requestId')));
-});
-
-app.post('/projects/:id/calculation/run', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const inputs = normalizeTechnicalInputs(safeJsonParse(project.technical_inputs_json, {}));
-  const validation = validateTechnicalInputs(inputs, project.typology);
-  const context = await getRegContext(c, project);
-  const framing = evaluateLegalFraming(project, context);
-  const checkedKeys = await getCheckedKeys(c, project.id);
-  const result = runPreCalculation({ project, legalFraming: framing, inputs, validation, checkedKeys });
-
-  const ts = nowIso();
-  const runId = randomId();
-  await c.env.DB.prepare(
-    `INSERT INTO calculation_runs (id,project_id,normative_package_code,normative_package_version,algorithm_version,status,input_snapshot_json,result_json,warnings_json,errors_json,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-  )
-    .bind(
-      runId,
-      project.id,
-      result.normativePackage.code,
-      result.normativePackage.version,
-      result.algorithmVersion,
-      result.summary.status,
-      JSON.stringify({ inputs, context, checkedKeys }),
-      JSON.stringify(result),
-      JSON.stringify(result.warnings),
-      JSON.stringify(result.errors),
-      ts,
-    )
-    .run();
-
-  await audit(c, 'calculation.run', { runId, status: result.summary.status, coverage: result.summary.coverage }, project.id);
-  return c.json(jsonOk({ runId, result }, c.get('requestId')));
-});
-
-app.get('/projects/:id/calculation/runs', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const rows = await c.env.DB.prepare(`SELECT id,normative_package_code,normative_package_version,algorithm_version,status,created_at FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 20`).bind(project.id).all<any>();
-  return c.json(jsonOk({ runs: rows.results || [] }, c.get('requestId')));
-});
-
-app.get('/projects/:id/calculation/latest', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const row = await c.env.DB.prepare(`SELECT * FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`).bind(project.id).first<any>();
-  return c.json(jsonOk({ latest: row ? { ...row, result: safeJsonParse(row.result_json, null) } : null }, c.get('requestId')));
-});
-
-app.get('/projects/:id/memorial', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const format = (c.req.query('format') || 'json').toLowerCase();
-  const inputs = normalizeTechnicalInputs(safeJsonParse(project.technical_inputs_json, {}));
-  const legal = evaluateLegalFraming(project, await getRegContext(c, project));
-  const latestRun = await c.env.DB.prepare(`SELECT * FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`).bind(project.id).first<any>();
-  const memorial = buildMemorial(project, legal, inputs, latestRun);
-  await audit(c, 'documents.memorial', { format }, project.id);
-  if (format === 'html') return c.html(memorial.html);
-  return c.json(jsonOk(memorial.json, c.get('requestId')));
-});
-
-app.get('/projects/:id/dossier', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  const format = (c.req.query('format') || 'json').toLowerCase();
-  const checkedKeys = await getCheckedKeys(c, project.id);
-  const legal = evaluateLegalFraming(project, await getRegContext(c, project));
-  const checklistItems = getChecklistTemplate(project.typology);
-  const latestRunRow = await c.env.DB.prepare(`SELECT * FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`).bind(project.id).first<any>();
-  const latestRun = latestRunRow ? safeJsonParse(latestRunRow.result_json, null) : null;
-  const dossier = buildDossier(project, legal, checklistItems, checkedKeys, latestRun);
-  await audit(c, 'documents.dossier', { format }, project.id);
-  if (format === 'html') return c.html(dossier.html);
-  return c.json(jsonOk(dossier.json, c.get('requestId')));
-});
-
-app.get('/projects/:id/memorial.pdf', async (c) => {
-  const project = await getOwnedProject(c, c.req.param('id'));
-  assert(project, 404, 'NOT_FOUND', 'Projeto não encontrado');
-  return c.json(jsonErr('PDF em Workers ainda não habilitado. Use /memorial?format=html ou json.', 'NOT_IMPLEMENTED', { featureFlag: 'PDF_EXPORT' }, c.get('requestId')), 501);
-});
-
-app.post('/projects/demo', async (c) => {
-  const ts = nowIso();
-  const id = randomId();
-  await c.env.DB.prepare(
-    `INSERT INTO projects (id,user_id,name,city,state,municipality_size,typology,phase,protocol_year,area_m2,is_federal_public,notes,technical_inputs_json,technical_inputs_updated_at,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  )
-    .bind(
-      id,
-      c.get('userId'),
-      'Projeto Demo VetorEco',
-      'Araguari',
-      'MG',
-      'large',
-      'comercial',
-      'anteprojeto',
-      2028,
-      1250,
-      0,
-      'Projeto de demonstração para validar fluxo técnico.',
-      JSON.stringify({
-        general: { zona_bioclimatica: 4, area_util_m2: 1250, pavimentos: 2 },
-        envelope: { area_fachada_total_m2: 780, area_fachada_envidracada_m2: 290, possui_protecao_solar: true, cobertura_u: 1.4, parede_u: 2.1 },
-        systems: { iluminacao_dpi_w_m2: 9.5, hvac_cop: 3.3, aquecimento_agua_tipo: null },
-        declaration: { use_autodeclaracao: false },
+  if (isReportFormat) {
+    const generatedKey = reportCaseId || `GC-${reportNormative}-${index + 1}`.replace(/[^A-Za-z0-9_-]/g, '-');
+    return {
+      case_key: generatedKey,
+      label: String(item?.label || `${reportNormative} • ${item?.building_type || 'Golden case PBE Edifica'}`),
+      normative_package_id: item?.normative_package_id || null,
+      input_json: JSON.stringify({
+        kind: 'report_reference',
+        report_case_id: reportCaseId || generatedKey,
+        normative: reportNormative,
+        building_type: item?.building_type || null,
+        bioclimatic_zone: item?.bioclimatic_zone || null,
+        source_url: item?.source_url || null,
+        technical_inputs: item?.technical_inputs ?? null,
+        expected_results: item?.expected_results ?? null
       }),
-      ts,
-      ts,
-      ts,
-    )
-    .run();
-
-  await c.env.DB.prepare(
-    `INSERT INTO project_regulatory_context (id,project_id,protocol_date,population_band,entity_scope,classification_method,state_code,autodeclaration_requested,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
-  )
-    .bind(randomId(), id, '2028-02-15', 'large', 'privado', 'INI', 'MG', 0, ts)
-    .run();
-
-  for (const key of ['zona_bioclimatica', 'env_orientacao', 'envoltoria', 'aberturas', 'iluminacao_pot']) {
-    await c.env.DB.prepare(`INSERT INTO project_checklist_items (id,project_id,item_key,checked,updated_at) VALUES (?,?,?,?,?)`).bind(randomId(), id, key, 1, ts).run();
+      expected_output_json: JSON.stringify({
+        expected_results: item?.expected_results ?? null,
+        final_class_matrix: item?.final_class_matrix ?? null
+      }),
+      tolerance_json: JSON.stringify(item?.tolerance || item?.tolerance_json || { defaultAbs: 1e-6 }),
+      notes: item?.notes || item?.curation_notes || 'Golden case importado do relatório consolidado (formato PBE Edifica)',
+      updated_by_user_id: userId,
+      source_url: item?.source_url || null,
+      normative_code: reportNormative || null,
+      building_type: item?.building_type || null,
+      bioclimatic_zone: item?.bioclimatic_zone || null,
+      data_quality: item?.data_quality || null,
+      completeness_pct: item?.completeness_pct ?? null
+    } as any;
   }
 
-  await audit(c, 'projects.demo', {}, id);
-  return c.json(jsonOk({ projectId: id }, c.get('requestId')));
-});
+  const case_key = String(item.case_key || item.caseKey || '').trim();
+  if (!case_key) throw new Error('case_key ausente');
 
-app.get('/normatives/packages', requireAuth, async (c) => {
-  const rows = await c.env.DB.prepare(`SELECT code,version,title,valid_from,valid_to,is_legacy FROM normative_packages ORDER BY code, version`).all<any>();
-  return c.json(jsonOk({ packages: rows.results || [] }, c.get('requestId')));
-});
+  return {
+    case_key,
+    label: String(item.label || case_key || `Case ${index + 1}`),
+    normative_package_id: item.normative_package_id || item.normativePackageId || null,
+    input_json: JSON.stringify(item.input ?? item.input_json ?? {}),
+    expected_output_json: JSON.stringify(item.expected_output ?? item.expectedOutput ?? item.expected_output_json ?? {}),
+    tolerance_json: item.tolerance_json
+      ? (typeof item.tolerance_json === 'string' ? item.tolerance_json : JSON.stringify(item.tolerance_json))
+      : (item.tolerance ? JSON.stringify(item.tolerance) : null),
+    notes: item.notes || null,
+    updated_by_user_id: userId,
+    source_url: item.source_url || null,
+    normative_code: item.normative_code || item.normative || null,
+    building_type: item.building_type || null,
+    bioclimatic_zone: item.bioclimatic_zone || null,
+    data_quality: item.data_quality || null,
+    completeness_pct: item.completeness_pct ?? null
+  } as any;
+}
 
-app.get('/normatives/rules', requireAuth, async (c) => {
-  const rows = await c.env.DB.prepare(`SELECT package_code,package_version,rule_key,rule_value_json FROM normative_rules ORDER BY package_code,rule_key`).all<any>();
-  return c.json(jsonOk({ rules: rows.results || [] }, c.get('requestId')));
-});
+export function createApp(opts: AppFactoryOpts = {}) {
+  const app = new Hono<AppCtx>();
 
+  app.use('*', async (c, next) => {
+    c.set('requestId', crypto.randomUUID());
+    const repo = opts.repo || createD1Repo(c.env.DB);
+    c.set('repo', repo);
+    const origin = c.req.header('Origin');
+    const allowed = c.env.APP_ORIGIN || origin || '*';
+    return cors({
+      origin: (requestOrigin) => (!requestOrigin || requestOrigin === allowed ? (requestOrigin || allowed) : allowed),
+      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowHeaders: ['Content-Type', 'X-Organization-Id'],
+      credentials: true
+    })(c, next);
+  });
+
+  app.onError((err, c) => {
+    console.error(JSON.stringify({ requestId: c.get('requestId'), path: c.req.path, error: err.message }));
+    return c.json(jsonErr(c.get('requestId'), 'Erro interno', 'INTERNAL_ERROR'), 500);
+  });
+
+  app.get('/health', (c) => responseOk(c, { status: 'ok', time: nowIso() }));
+  app.get('/version', (c) => responseOk(c, { version: '0.4.2', api: 'vetoreco-cloudflare' }));
+
+  app.post('/auth/register', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = String(body.password || '');
+    const workspaceName = String(body.workspaceName || '').trim();
+    if (!email.includes('@') || password.length < 8) return responseErr(c, 'Email inválido ou senha curta (mínimo 8).');
+    if (await repo.getUserByEmail(email)) return responseErr(c, 'Email já cadastrado', 'CONFLICT', 409);
+
+    const { hash, salt } = await hashPassword(password);
+    const user = await repo.createUser({ email, password_hash: hash, password_salt: salt });
+    const org = await repo.createOrganization({ name: workspaceName || `Workspace ${email.split('@')[0]}`, slug: sanitizeSlug(workspaceName || email.split('@')[0]), owner_user_id: user.id });
+    await repo.addOrganizationMember({ organization_id: org.id, user_id: user.id, role: 'owner' });
+
+    await audit(c, 'auth.register', { email, organizationId: org.id });
+    return responseOk(c, { user: { id: user.id, email: user.email }, organization: org }, 201);
+  });
+
+  app.post('/auth/login', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const ip = c.req.header('CF-Connecting-IP') || 'local';
+    const attempts = (loginAttempts.get(ip) || []).filter((t) => Date.now() - t < 15 * 60_000);
+    if (attempts.length >= 10) return responseErr(c, 'Muitas tentativas. Tente novamente depois.', 'RATE_LIMITED', 429);
+
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = String(body.password || '');
+
+    const user = await repo.getUserByEmail(email);
+    if (!user || !(await verifyPassword(password, user.password_salt, user.password_hash))) {
+      attempts.push(Date.now()); loginAttempts.set(ip, attempts);
+      return responseErr(c, 'Credenciais inválidas', 'UNAUTHORIZED', 401);
+    }
+
+    const rawToken = `${crypto.randomUUID()}${crypto.randomUUID()}`;
+    const tokenHash = await sha256Hex(rawToken);
+    const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
+    const session = await repo.createSession({ user_id: user.id, token_hash: tokenHash, expires_at: expiresAt });
+
+    const secureCookie = !(c.req.header('Host') || '').includes('localhost');
+    c.header('Set-Cookie', cookieSerialize('vetoreco_session', rawToken, { maxAge: SESSION_DAYS * 86400, secure: secureCookie }));
+    await audit(c, 'auth.login', { email, sessionId: session.id });
+    return responseOk(c, { user: { id: user.id, email: user.email } });
+  });
+
+  app.post('/auth/logout', requireAuth, async (c) => {
+    const repo = c.get('repo') as Repo;
+    await repo.deleteSession(c.get('sessionId'));
+    const secureCookie = !(c.req.header('Host') || '').includes('localhost');
+    c.header('Set-Cookie', cookieSerialize('vetoreco_session', '', { maxAge: 0, secure: secureCookie }));
+    await audit(c, 'auth.logout');
+    return responseOk(c, {});
+  });
+
+  app.get('/auth/me', requireAuth, async (c) => {
+    const repo = c.get('repo') as Repo;
+    const user = await repo.getUserById(c.get('userId'));
+    const orgs = await repo.listOrganizationsForUser(c.get('userId'));
+    return responseOk(c, {
+      user: user ? { id: user.id, email: user.email, is_super_admin: !!user.is_super_admin } : null,
+      organizations: orgs,
+      activeOrganizationId: c.get('organizationId')
+    });
+  });
+
+  app.use('/organizations', requireAuth);
+  app.use('/organizations/*', requireAuth);
+  app.get('/organizations', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const organizations = await repo.listOrganizationsForUser(c.get('userId'));
+    return responseOk(c, { organizations });
+  });
+  app.post('/organizations', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const name = String(body.name || '').trim();
+    if (name.length < 3) return responseErr(c, 'Nome da organização muito curto');
+    const org = await repo.createOrganization({ name, slug: sanitizeSlug(name), owner_user_id: c.get('userId') });
+    await repo.addOrganizationMember({ organization_id: org.id, user_id: c.get('userId'), role: 'owner' });
+    await audit(c, 'organizations.create', { organizationId: org.id });
+    return responseOk(c, { organization: org }, 201);
+  });
+
+  app.use('/projects', requireAuth);
+  app.use('/projects/*', requireAuth);
+
+  app.get('/projects', async (c) => {
+    const repo = c.get('repo') as Repo;
+    return responseOk(c, { projects: await repo.listProjects(c.get('organizationId')) });
+  });
+
+  app.post('/projects', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    if (!b.name) return responseErr(c, 'Nome do projeto é obrigatório');
+    const project = await repo.createProject({
+      organization_id: c.get('organizationId'),
+      user_id: c.get('userId'),
+      name: String(b.name),
+      city: String(b.city || ''),
+      state: String(b.state || ''),
+      municipality_size: (b.municipality_size || 'large') as MunicipalityBand,
+      typology: (b.typology || 'residencial') as Typology,
+      phase: String(b.phase || 'anteprojeto'),
+      protocol_year: Number(b.protocol_year || new Date().getFullYear()),
+      area_m2: b.area_m2 == null || b.area_m2 === '' ? null : Number(b.area_m2),
+      is_federal_public: b.is_federal_public ? 1 : 0,
+      notes: String(b.notes || '')
+    });
+    await repo.upsertRegulatoryContext(project.id, c.get('userId'), {
+      classification_method: 'INI',
+      protocol_date: `${project.protocol_year}-01-01`,
+      municipality_population_band: project.municipality_size,
+      public_entity_level: project.is_federal_public ? 'federal' : 'na',
+      is_public_building: project.typology === 'publica' ? 1 : 0,
+      requests_autodeclaration: 0
+    });
+    await repo.upsertTechnicalInputs(project.id, c.get('userId'), normalizeTechnicalInputs({}));
+    await repo.createProjectVersion(project.id, 'initial', project);
+    await audit(c, 'projects.create', { projectId: project.id }, project.id);
+    return responseOk(c, { project }, 201);
+  });
+
+  app.post('/projects/demo', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await repo.createProject({
+      organization_id: c.get('organizationId'),
+      user_id: c.get('userId'),
+      name: 'Projeto Demo VetorEco',
+      city: 'São Paulo',
+      state: 'SP',
+      municipality_size: 'large',
+      typology: 'comercial',
+      phase: 'anteprojeto',
+      protocol_year: 2028,
+      area_m2: 1500,
+      is_federal_public: 0,
+      notes: 'Projeto de demonstração do fluxo de eficiência energética.'
+    });
+    await repo.upsertRegulatoryContext(project.id, c.get('userId'), {
+      classification_method: 'INI',
+      protocol_date: '2028-04-10',
+      municipality_population_band: 'large',
+      public_entity_level: 'na',
+      is_public_building: 0,
+      requests_autodeclaration: 1
+    });
+    await repo.upsertChecklistItems(project.id, getChecklistTemplate(project.typology).slice(0, 4).map((i) => ({ item_id: i.id, checked: 1 })));
+    await repo.upsertTechnicalInputs(project.id, c.get('userId'), normalizeTechnicalInputs({
+      general: { climateZone: 'ZB3', floors: 4, conditionedAreaM2: 1200, useHoursPerDay: 12 },
+      envelope: { wallUValue: 2.1, roofUValue: 1.6, windowToWallRatio: 42, shadingFactor: 0.4 },
+      systems: { lightingLPD: 8.5, hvacType: 'VRF', hvacCop: 3.2 },
+      autodeclaration: { requested: true, justification: 'Pré-avaliação interna do escritório' }
+    }));
+    await audit(c, 'projects.demo.create', { projectId: project.id }, project.id);
+    return responseOk(c, { project }, 201);
+  });
+
+  app.get('/projects/:id', async (c) => {
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    return responseOk(c, { project });
+  });
+
+  app.put('/projects/:id', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const current = await getProjectOr404(c);
+    if (!current) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const updated = await repo.updateProject(current.id, c.get('organizationId'), {
+      name: b.name ?? current.name,
+      city: b.city ?? current.city,
+      state: b.state ?? current.state,
+      municipality_size: (b.municipality_size ?? current.municipality_size) as MunicipalityBand,
+      typology: (b.typology ?? current.typology) as Typology,
+      phase: b.phase ?? current.phase,
+      protocol_year: b.protocol_year == null ? current.protocol_year : Number(b.protocol_year),
+      area_m2: b.area_m2 === '' ? null : (b.area_m2 == null ? current.area_m2 : Number(b.area_m2)),
+      is_federal_public: b.is_federal_public === undefined ? current.is_federal_public : (b.is_federal_public ? 1 : 0),
+      notes: b.notes ?? current.notes
+    });
+    if (!updated) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    await repo.createProjectVersion(updated.id, `update-${Date.now()}`, updated);
+    await audit(c, 'projects.update', { projectId: updated.id }, updated.id);
+    return responseOk(c, { project: updated });
+  });
+
+  app.delete('/projects/:id', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    await repo.deleteProject(project.id, c.get('organizationId'));
+    await audit(c, 'projects.delete', { projectId: project.id }, project.id);
+    return responseOk(c, {});
+  });
+
+  app.get('/projects/:id/checklist', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const rows = await repo.getChecklistItems(project.id);
+    const checkedIds = rows.filter((r) => Number(r.checked) === 1).map((r) => r.item_id);
+    const summary = computeChecklistSummary(project.typology, checkedIds);
+    return responseOk(c, {
+      items: summary.items.map((i) => ({ ...i, checked: checkedIds.includes(i.id) })),
+      summary
+    });
+  });
+
+  app.put('/projects/:id/checklist', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const items = Array.isArray(body.items) ? body.items : [];
+    await repo.upsertChecklistItems(project.id, items.map((i: any) => ({ item_id: String(i.item_id || i.id || ''), checked: i.checked ? 1 : 0 })).filter((i: any) => i.item_id));
+    await audit(c, 'projects.checklist.update', { count: items.length }, project.id);
+    return responseOk(c, {});
+  });
+
+  app.get('/projects/:id/regulatory-context', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    return responseOk(c, { context: await repo.getRegulatoryContext(project.id) });
+  });
+
+  app.put('/projects/:id/regulatory-context', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const method = (b.classification_method || 'INI') as 'INI' | 'RTQ_LEGADO';
+    if (!['INI', 'RTQ_LEGADO'].includes(method)) return responseErr(c, 'classification_method inválido');
+    const context = await repo.upsertRegulatoryContext(project.id, c.get('userId'), {
+      classification_method: method,
+      protocol_date: b.protocol_date || null,
+      permit_protocol_date: b.permit_protocol_date || null,
+      public_tender_date: b.public_tender_date || null,
+      municipality_population_band: (b.municipality_population_band || null) as MunicipalityBand | null,
+      public_entity_level: (b.public_entity_level || 'na') as PublicEntityLevel,
+      is_public_building: b.is_public_building ? 1 : 0,
+      requests_autodeclaration: b.requests_autodeclaration ? 1 : 0,
+      legacy_reason: b.legacy_reason || null,
+      legacy_ence_project_evidence: b.legacy_ence_project_evidence || null,
+      notes: b.notes || null
+    });
+    await audit(c, 'projects.regulatory_context.update', { method: context.classification_method }, project.id);
+    return responseOk(c, { context });
+  });
+
+  app.get('/projects/:id/legal-framing', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const context = await repo.getRegulatoryContext(project.id);
+    const framing = await computeLiveFraming(repo, project, context);
+    return responseOk(c, { framing });
+  });
+
+  app.get('/projects/:id/technical-inputs', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const inputs = await repo.getTechnicalInputs(project.id);
+    return responseOk(c, { inputs, validation: validateTechnicalInputs(project.typology, inputs) });
+  });
+
+  app.put('/projects/:id/technical-inputs', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const normalized = normalizeTechnicalInputs(body.inputs || body);
+    const validation = validateTechnicalInputs(project.typology, normalized);
+    if (validation.errors.length) return responseErr(c, 'Falha na validação dos inputs técnicos', 'VALIDATION_ERROR', 422, { errors: validation.errors });
+    await repo.upsertTechnicalInputs(project.id, c.get('userId'), normalized);
+    await audit(c, 'projects.technical_inputs.update', { coverage: validation.coverage.percent }, project.id);
+    return responseOk(c, { inputs: normalized, validation });
+  });
+
+  app.post('/projects/:id/calculation/run', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+
+    const context = await repo.getRegulatoryContext(project.id);
+    const legalFraming = await computeLiveFraming(repo, project, context);
+    const technicalInputs = await repo.getTechnicalInputs(project.id);
+    const technicalValidation = validateTechnicalInputs(project.typology, technicalInputs);
+    const checklistRows = await repo.getChecklistItems(project.id);
+    const checklistSummary = computeChecklistSummary(project.typology, checklistRows.filter((x) => Number(x.checked) === 1).map((x) => x.item_id));
+    const outputBase = runPreCalculation({ project, legalFraming, technicalValidation, checklistCoverage: checklistSummary.coverage });
+    let thermalSummary: any = null;
+    let output: any = { ...outputBase };
+    if (c.env.DB) {
+      try {
+        let latestThermal = await getLatestProjectThermalCalculation(c.env.DB, project.id);
+        if (!latestThermal) {
+          const thermalQuick = await getProjectThermalQuick(c.env.DB, project.id).catch(() => null);
+          const hasThermalQuick = !!(thermalQuick && (thermalQuick.wall || thermalQuick.roof || (thermalQuick.windows || []).length || (thermalQuick.lighting || []).length || (thermalQuick.hvac || []).length));
+          if (hasThermalQuick) {
+            latestThermal = await calculateProjectThermal(c.env.DB, project.id, { mode: 'auto' }).catch(() => null as any);
+          }
+        }
+        if (latestThermal?.calculation) {
+          thermalSummary = {
+            method: latestThermal.calculation.calculation_method,
+            zone: latestThermal.calculation.bioclimatic_zone,
+            overallCompliant: !!latestThermal.checks?.overall_compliant,
+            rtqrRating: latestThermal.calculation.rtqr_rating || null,
+            rtqcRating: latestThermal.calculation.rtqc_rating || null,
+            nbrCompliant: !!latestThermal.calculation.nbr_compliant,
+            criticalIssues: Number(latestThermal.checks?.critical_issues || 0)
+          };
+          output = {
+            ...outputBase,
+            thermalSummary,
+            warnings: [
+              ...(outputBase.warnings || []),
+              ...(thermalSummary.overallCompliant ? [] : ['Verificação térmica complementar com pendências.'])
+            ]
+          };
+        }
+      } catch (err) {
+        // Tabelas térmicas podem não estar migradas ainda; mantém cálculo base
+      }
+    }
+
+    const runRecord = await repo.insertCalculationRun({
+      project_id: project.id,
+      normative_package_id: legalFraming.normativePackage?.id || null,
+      algorithm_version: output.algorithmVersion,
+      status: output.status,
+      input_snapshot_json: JSON.stringify({ project, context, technicalInputs, checklistRows, thermalSummary }),
+      output_json: JSON.stringify(output),
+      created_by_user_id: c.get('userId')
+    });
+
+    await audit(c, 'projects.calculation.run', { runId: runRecord.id, status: output.status }, project.id);
+    return responseOk(c, { run: runRecord, output, legalFraming, technicalValidation, checklistSummary, thermalSummary });
+  });
+
+  app.get('/projects/:id/calculation/latest', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const run = await repo.getLatestCalculationRun(project.id);
+    return responseOk(c, { run, output: run ? JSON.parse(run.output_json) : null });
+  });
+
+  app.get('/projects/:id/calculation/runs', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    return responseOk(c, { runs: await repo.listCalculationRuns(project.id, Number(c.req.query('limit') || 20)) });
+  });
+
+  app.get('/projects/:id/memorial', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const context = await repo.getRegulatoryContext(project.id);
+    const framing = await computeLiveFraming(repo, project, context);
+    const technicalInputs = await repo.getTechnicalInputs(project.id);
+    const latest = await repo.getLatestCalculationRun(project.id);
+    const calc = latest ? JSON.parse(latest.output_json) : null;
+    const thermalCalc = c.env.DB ? await getLatestProjectThermalCalculation(c.env.DB, project.id).catch(() => null) : null;
+    const doc = buildMemorialDocument({ project, legalFraming: framing, technicalInputs, calc, thermalCalc });
+    if (c.req.query('format') === 'html') return c.html(doc.html);
+    return responseOk(c, doc);
+  });
+
+  app.get('/projects/:id/memorial.pdf', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const context = await repo.getRegulatoryContext(project.id);
+    const framing = await computeLiveFraming(repo, project, context);
+    const technicalInputs = await repo.getTechnicalInputs(project.id);
+    const latest = await repo.getLatestCalculationRun(project.id);
+    const calc = latest ? JSON.parse(latest.output_json) : null;
+    const thermalCalc = c.env.DB ? await getLatestProjectThermalCalculation(c.env.DB, project.id).catch(() => null) : null;
+    const memorial = buildMemorialDocument({ project, legalFraming: framing, technicalInputs, calc, thermalCalc });
+    const pdfBytes = await buildSimplePdfFromText(memorial.json.title, memorial.text);
+    c.header('Content-Type', 'application/pdf');
+    c.header('Content-Disposition', `inline; filename="memorial-${project.id}.pdf"`);
+    return c.body(pdfBytes);
+  });
+
+  app.get('/projects/:id/dossier', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const context = await repo.getRegulatoryContext(project.id);
+    const framing = await computeLiveFraming(repo, project, context);
+    const latest = await repo.getLatestCalculationRun(project.id);
+    const calc = latest ? JSON.parse(latest.output_json) : null;
+    const checklistRows = await repo.getChecklistItems(project.id);
+    const checklistSummary = computeChecklistSummary(project.typology, checklistRows.filter((x) => Number(x.checked) === 1).map((x) => x.item_id));
+    const thermalCalc = c.env.DB ? await getLatestProjectThermalCalculation(c.env.DB, project.id).catch(() => null) : null;
+    const doc = buildDossierDocument({ project, legalFraming: framing, checklistSummary, calc, thermalCalc });
+    if (c.req.query('format') === 'html') return c.html(doc.html);
+    return responseOk(c, doc);
+  });
+
+  app.get('/projects/:id/diagnosis', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const framing = await computeLiveFraming(repo, project, await repo.getRegulatoryContext(project.id));
+    return responseOk(c, { diagnosis: { mandatory: framing.applicable, minLevel: framing.minLevel, path: framing.compliancePath }, badge: `${framing.classificationMethod} • ${framing.compliancePath}` });
+  });
+
+  app.get('/projects/:id/risk', async (c) => {
+    const repo = c.get('repo') as Repo;
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    const checklistRows = await repo.getChecklistItems(project.id);
+    const summary = computeChecklistSummary(project.typology, checklistRows.filter((x) => Number(x.checked) === 1).map((x) => x.item_id));
+    return responseOk(c, { risk: { status: summary.status, progress: summary.coverage, criticalMissing: summary.criticalMissing, message: summary.message } });
+  });
+
+
+  app.get('/thermal/catalog/zones', async (c) => {
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    try {
+      return responseOk(c, { zones: await listThermalZones(c.env.DB) });
+    } catch (err: any) {
+      return responseErr(c, `Falha ao carregar zonas bioclimáticas: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.get('/thermal/catalog/materials', async (c) => {
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    try {
+      return responseOk(c, { materials: await listThermalMaterials(c.env.DB, c.req.query('categoryId') || undefined) });
+    } catch (err: any) {
+      return responseErr(c, `Falha ao carregar materiais: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.get('/thermal/catalog/municipalities', async (c) => {
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    try {
+      return responseOk(c, {
+        municipalities: await searchMunicipalities(c.env.DB, {
+          q: c.req.query('q') || undefined,
+          state: c.req.query('state') || undefined,
+          limit: Number(c.req.query('limit') || 20)
+        })
+      });
+    } catch (err: any) {
+      return responseErr(c, `Falha ao carregar municípios: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.get('/projects/:id/thermal/quick', async (c) => {
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    try {
+      return responseOk(c, { thermal: await getProjectThermalQuick(c.env.DB, project.id) });
+    } catch (err: any) {
+      return responseErr(c, `Falha ao ler dados térmicos: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.put('/projects/:id/thermal/quick', async (c) => {
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    try {
+      const saved = await saveProjectThermalQuick(c.env.DB, project.id, body.thermal || body);
+      await audit(c, 'projects.thermal.quick.update', { hasWall: !!saved.wall, windows: (saved.windows || []).length }, project.id);
+      return responseOk(c, { thermal: saved });
+    } catch (err: any) {
+      return responseErr(c, `Falha ao salvar dados térmicos: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.post('/projects/:id/thermal/calculate', async (c) => {
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    try {
+      if (body.thermal) await saveProjectThermalQuick(c.env.DB, project.id, body.thermal);
+      const latest = await calculateProjectThermal(c.env.DB, project.id, { mode: body.mode || 'auto' });
+      await audit(c, 'projects.thermal.calculate', { mode: body.mode || 'auto' }, project.id);
+      return responseOk(c, latest);
+    } catch (err: any) {
+      return responseErr(c, `Falha no cálculo térmico: ${err.message}`, 'THERMAL_CALC_ERROR', 422);
+    }
+  });
+
+  app.get('/projects/:id/thermal/latest', async (c) => {
+    const project = await getProjectOr404(c);
+    if (!project) return responseErr(c, 'Projeto não encontrado', 'NOT_FOUND', 404);
+    if (!c.env.DB) return responseErr(c, 'Banco D1 não configurado', 'NOT_AVAILABLE', 501);
+    try {
+      return responseOk(c, await getLatestProjectThermalCalculation(c.env.DB, project.id));
+    } catch (err: any) {
+      return responseErr(c, `Falha ao buscar cálculo térmico: ${err.message}`, 'THERMAL_SCHEMA_MISSING', 500);
+    }
+  });
+
+  app.post('/admin/golden-cases/import', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const incoming = Array.isArray(body.cases) ? body.cases : [];
+    let imported = 0;
+    const errors: any[] = [];
+    for (const [i, item] of incoming.entries()) {
+      try {
+        const normalized = normalizeGoldenCaseImportItem(item, i, c.get('userId'));
+        await repo.upsertGoldenCaseResult(normalized);
+        imported += 1;
+      } catch (err: any) {
+        errors.push({ index: i, message: err.message || 'erro' });
+      }
+    }
+    await audit(c, 'admin.golden_cases.import', { imported, errors: errors.length });
+    return responseOk(c, { imported, errors });
+  });
+
+  app.post('/admin/golden-cases/run', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const body = getBody<any>(await c.req.json().catch(() => ({})));
+    const rows = await repo.listGoldenCaseResults(Number(body.limit) || 500);
+    const report = runGoldenCases(rows, { caseKeys: Array.isArray(body.caseKeys) ? body.caseKeys : undefined });
+    await audit(c, 'admin.golden_cases.run', { total: report.summary.total, supported: report.summary.supportedTotal, skipped: report.summary.skipped, failed: report.summary.failed });
+    return responseOk(c, report);
+  });
+
+  app.use('/admin', requireAuth);
+  app.use('/admin/*', requireAuth);
+
+  app.get('/admin/normative/packages', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    return responseOk(c, { packages: await repo.listNormativePackages() });
+  });
+
+  app.post('/admin/normative/packages', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const pkg = await repo.createNormativePackage({
+      code: String(b.code || ''),
+      title: String(b.title || ''),
+      mode: String(b.mode || 'INI'),
+      effective_from: String(b.effective_from || new Date().toISOString().slice(0,10)),
+      effective_to: b.effective_to || null,
+      is_active: b.is_active === undefined ? 1 : (b.is_active ? 1 : 0),
+      metadata_json: b.metadata_json ? JSON.stringify(b.metadata_json) : null
+    });
+    return responseOk(c, { package: pkg }, 201);
+  });
+
+  app.put('/admin/normative/packages/:id', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const pkg = await repo.updateNormativePackage(c.req.param('id'), {
+      code: b.code,
+      title: b.title,
+      mode: b.mode,
+      effective_from: b.effective_from,
+      effective_to: b.effective_to,
+      is_active: b.is_active === undefined ? undefined : (b.is_active ? 1 : 0),
+      metadata_json: b.metadata_json ? JSON.stringify(b.metadata_json) : undefined
+    } as any);
+    if (!pkg) return responseErr(c, 'Pacote não encontrado', 'NOT_FOUND', 404);
+    return responseOk(c, { package: pkg });
+  });
+
+  app.get('/admin/normative/rules', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const rules = await repo.listNormativeRules(c.req.query('packageId') || undefined);
+    return responseOk(c, { rules });
+  });
+
+  app.post('/admin/normative/rules', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const rule = await repo.createNormativeRule({
+      package_id: String(b.package_id || ''),
+      rule_key: String(b.rule_key || ''),
+      title: String(b.title || b.rule_key || ''),
+      sort_order: Number(b.sort_order || 100),
+      criteria_json: JSON.stringify(b.criteria_json || {}),
+      outcome_json: JSON.stringify(b.outcome_json || {}),
+      effective_from: String(b.effective_from || new Date().toISOString().slice(0,10)),
+      effective_to: b.effective_to || null,
+      is_active: b.is_active === undefined ? 1 : (b.is_active ? 1 : 0),
+      notes: b.notes || null
+    });
+    return responseOk(c, { rule }, 201);
+  });
+
+  app.put('/admin/normative/rules/:id', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    const rule = await repo.updateNormativeRule(c.req.param('id'), {
+      package_id: b.package_id,
+      rule_key: b.rule_key,
+      title: b.title,
+      sort_order: b.sort_order,
+      criteria_json: b.criteria_json ? JSON.stringify(b.criteria_json) : undefined,
+      outcome_json: b.outcome_json ? JSON.stringify(b.outcome_json) : undefined,
+      effective_from: b.effective_from,
+      effective_to: b.effective_to,
+      is_active: b.is_active === undefined ? undefined : (b.is_active ? 1 : 0),
+      notes: b.notes
+    } as any);
+    if (!rule) return responseErr(c, 'Regra não encontrada', 'NOT_FOUND', 404);
+    return responseOk(c, { rule });
+  });
+
+  app.delete('/admin/normative/rules/:id', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    await repo.deleteNormativeRule(c.req.param('id'));
+    return responseOk(c, {});
+  });
+
+  app.get('/admin/golden-cases', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    return responseOk(c, { items: await repo.listGoldenCaseResults(Number(c.req.query('limit') || 50)) });
+  });
+
+  app.post('/admin/golden-cases', async (c) => {
+    const deny = requireSuperAdmin(c); if (deny) return deny;
+    const repo = c.get('repo') as Repo;
+    const b = getBody<any>(await c.req.json().catch(() => ({})));
+    await repo.upsertGoldenCaseResult(normalizeGoldenCaseImportItem({
+      case_key: b.case_key,
+      label: b.label,
+      normative_package_id: b.normative_package_id,
+      input_json: b.input_json || {},
+      expected_output_json: b.expected_output_json || {},
+      tolerance_json: b.tolerance_json || null,
+      notes: b.notes || null,
+      source_url: b.source_url || null,
+      normative_code: b.normative_code || null,
+      building_type: b.building_type || null,
+      bioclimatic_zone: b.bioclimatic_zone || null,
+      data_quality: b.data_quality || null,
+      completeness_pct: b.completeness_pct ?? null
+    }, 0, c.get('userId')) as any);
+    return responseOk(c, {});
+  });
+
+  return app;
+}
+
+const app = createApp();
 export default app;
+export { createInMemoryRepo };

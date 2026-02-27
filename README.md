@@ -1,124 +1,258 @@
-# VetorEco (Cloudflare-first SaaS)
+# VetorEco — MVP (Guia técnico normativo: INI-first + RAC)
 
-MVP funcional para **triagem e compliance operacional** de eficiência energética (PBE Edifica), com foco em:
+**Stack**: Cloudflare Workers + Hono + React + D1  
+**Base**: vetoreco-hybrid-v3  
+**Status**: MVP (pronto para GitHub)
 
-- autenticação + sessão
-- multi-tenant (organizations/workspaces)
-- projetos
-- checklist de triagem
-- contexto regulatório (INI / RTQ legado)
-- inputs técnicos
-- pré-cálculo auditável (heurístico MVP)
-- memorial e dossiê em **HTML/JSON-first**
-- **exportação PDF do memorial (implementada via `pdf-lib`)**
-- admin de pacotes/regras normativas (CRUD)
-- golden cases (seed + endpoint de gestão)
-- auditoria e versionamento de projeto
+---
 
-## Stack
+## O que é o VetorEco
 
-- **Frontend:** React + Vite
-- **API:** Hono (Cloudflare Workers)
-- **Banco:** Cloudflare D1 (SQLite)
-- **PDF:** `pdf-lib` (geração nativa no edge)
-- **Testes:** Vitest
+O VetorEco é um **guia técnico normativo** para ajudar arquitetos a preparar e organizar a documentação exigida para conquistar a **ENCE (Projeto e Construído)**.
 
-## Estrutura
+Ele transforma normas e manuais em:
+- checklist por etapa (estudo → anteprojeto → executivo → obra)
+- biblioteca técnica (conteúdo educativo + referências)
+- apoio de rastreabilidade (cálculos, evidências e dossiê PDF)
 
-- `apps/api` → API Worker + módulos de domínio + testes
-- `apps/web` → Interface React do MVP
-- `apps/api/db/schema.sql` → schema D1
-- `apps/api/db/seed.sql` → seed normativo inicial
-- `apps/api/db/seed_003_golden_cases.sql` → seed dos golden cases oficiais curados
-- `docs/golden-cases/` → relatório PDF + análise + JSON extraído
+### O que o VetorEco NÃO é
 
-## Rodar localmente
+- **Não emite ENCE**
+- **Não é motor de cálculo oficial**
+- **Não inventa números normativos**
 
-> Requer Node 20+ e Cloudflare Wrangler configurado.
+Quando não houver uma fonte pública verificável para um número, o sistema **remove o número** ou **vira alerta qualitativo**.
 
-1. Instale dependências:
-   - `npm install`
+---
 
-2. Crie/ligue o D1 no `wrangler.jsonc` e aplique schema + seeds (base + térmico + golden cases):
-   - `wrangler d1 execute vetoreco-db --file=apps/api/db/schema.sql`
-   - `wrangler d1 execute vetoreco-db --file=apps/api/db/seed.sql`
-   - `wrangler d1 execute vetoreco-db --file=apps/api/db/migration_002_thermal.sql`
-   - `wrangler d1 execute vetoreco-db --file=apps/api/db/seed_002_thermal.sql`
+## O que existe no MVP
 
-3. Suba a API:
-   - `npm run dev:api`
+### Backend (API)
+- Rotas de projetos, checklist, cálculos e evidências
+- Rotas de biblioteca técnica (`/education/*`)
+- Rotas de clima (`/climate/*`) com **estimativa aproximada** de ZB (sempre com disclaimer)
+- Rota RTQ-C DPIL (`/rtqc/dpil`) com tabela estruturada
+- Dossiê PDF profissional (`/projects/:id/dossier.pdf`) com:
+  - capa
+  - resumo do projeto
+  - checklist com status
+  - evidências vinculadas
+  - memórias de cálculo
+  - pendências críticas
+  - base normativa (pack + links oficiais)
 
-4. Suba o frontend:
-   - `npm run dev:web`
+### Frontend (Web)
+- Aba **Biblioteca técnica** consumindo `/education/topics`
+- Perfil técnico com botão **“Estimar Zona Bioclimática (aproximado)”**
+- Calculadora LPD com comparação contra DPIL (RTQ-C)
 
-Frontend usa proxy `/api` → `wrangler dev` local.
+### Request ID e logs (observabilidade mínima)
 
-## Fluxo recomendado no MVP
+O backend gera um **Request ID** por requisição e devolve:
 
-1. Cadastre/login
-2. Crie um projeto (ou use **Projeto Demo**)
-3. Ajuste checklist, contexto regulatório e inputs técnicos
-4. Rode **pré-cálculo**
-5. Abra:
-   - Memorial JSON/HTML
-   - **Memorial PDF**
-   - Dossiê operacional
+- Header: `X-Request-Id`
+- Campo `requestId` em todas as respostas JSON
 
-## Observações do MVP
+Em caso de erro, o frontend exibe esse ID no alerta (ex.: `ID: ...`). Isso facilita depuração em produção.
 
-- O motor de cálculo ainda é **heurístico auditável** (pré-cálculo), pronto para evoluir para cobertura normativa P1/P2.
-- O PDF já está implementado (texto estruturado em A4 via `pdf-lib`), sem depender de headless browser.
-- O admin normativo agora suporta **CRUD** de pacotes e regras.
-- Golden cases estão preparados no banco/endpoints para validação progressiva.
+---
 
-## Próximos passos sugeridos
+## Estrutura do projeto
 
-1. Cobertura normativa completa P1/P2 (por tipologia)
-2. Golden cases reais validados por especialista
-3. Template PDF visual avançado (layout institucional)
-4. RBAC refinado por papel (owner/admin/member)
-5. Assinatura e trilha de aprovação de memorial
+```
+vetoreco-hybrid/
+├── apps/
+│   ├── api/
+│   │   └── src/
+│   │       ├── modules/
+│   │       │   ├── climate.ts
+│   │       │   ├── educational.ts
+│   │       │   ├── validation.ts
+│   │       │   ├── rtqc.ts
+│   │       │   ├── calculators.ts
+│   │       │   ├── dossier_improved.ts
+│   │       │   └── journey.ts
+│   │       └── knowledge/
+│   │           └── packs/
+│   │               └── ini_2025_05/    ✅ MANTIDO
+│   └── web/
+├── db/
+│   └── schema.sql
+└── docs/
+    ├── CONCEITO.md
+    ├── NORMAS_E_REFERENCIAS.md
+    ├── PACOTE_SUBMISSAO.md
+    └── MEMORIAL_GUIADO.md
+```
+
+---
+
+## Instalação
+
+```bash
+# 1. Instalar dependências
+npm install
+
+# 2. Configurar API
+cd apps/api
+npx wrangler d1 create vetoreco-hybrid
+npx wrangler d1 migrations apply vetoreco-hybrid --local
+# (produção) npx wrangler d1 migrations apply vetoreco-hybrid
+
+# Opcional: (re)criar do zero via schema.sql
+# npx wrangler d1 execute vetoreco-hybrid --file ../../db/schema.sql
+npx wrangler dev
+
+# 3. Configurar Frontend
+cd ../web
+cp .env.example .env
+npm run dev
+```
+
+## Migrações (D1)
+
+O banco é mantido via migrações em `db/migrations/`.
+
+Fluxo recomendado:
+```bash
+cd apps/api
+# ambiente local
+npx wrangler d1 migrations apply vetoreco-hybrid --local
+
+# produção (sem --local)
+npx wrangler d1 migrations apply vetoreco-hybrid
+```
+
+Se você mudar o schema (evidências, audit logs, etc.), **crie uma nova migração** e não edite migrações antigas.
+
+---
+
+## Cache do Dossiê (PDF) no R2 (recomendado para Free tier)
+
+Para reduzir CPU no Workers (especialmente no plano gratuito), o VetorEco **cacheia o PDF do dossiê em R2** e **regenera somente quando o projeto mudar**.
+
+### Criar bucket
+
+```bash
+cd apps/api
+wrangler r2 bucket create vetoreco-dossiers
+```
+
+O binding já está configurado em `apps/api/wrangler.jsonc` como `DOSSIERS`.
+
+### Endpoints
+
+- `GET /projects/:id/dossier/status` → informa se existe cache e se precisa regenerar
+- `POST /projects/:id/dossier/generate?force=true|false` → gera/atualiza o PDF no R2
+- `GET /projects/:id/dossier/download` → retorna o PDF **somente se estiver atualizado**
+- `GET /projects/:id/dossier.pdf` → compatível: retorna cache se existir, senão gera e salva
+
+### Expiração automática (TTL) dos PDFs (recomendado)
+
+Para evitar acumular PDFs e manter o custo/armazenamento sob controle, ative uma regra de **Object Lifecycles** no bucket para apagar automaticamente os objetos do dossiê após um período.
+
+> Nota: objetos normalmente são removidos em até ~24h após vencerem.
+
+Os PDFs são gravados com o prefixo `project-` (ex.: `project-<id>/dossier-<hash>.pdf`).
+
+Exemplo (TTL = **7 dias**):
+
+```bash
+cd apps/api
+npx wrangler r2 bucket lifecycle add vetoreco-dossiers dossier-ttl-7d project- --expire-days 7 --force
+```
+
+Para conferir as regras:
+
+```bash
+cd apps/api
+npx wrangler r2 bucket lifecycle list vetoreco-dossiers
+```
+
+---
+
+## Checklist de Go‑Live (produção)
+
+Use esta lista antes de divulgar o link para usuários reais.
+
+### Infra (Cloudflare)
+- [ ] **D1 (produção)**: migrações aplicadas
+  - `cd apps/api && npx wrangler d1 migrations apply vetoreco-hybrid`
+- [ ] **R2**: bucket criado e binding `DOSSIERS` configurado
+  - `cd apps/api && wrangler r2 bucket create vetoreco-dossiers`
+- [ ] **R2 TTL**: lifecycle ativo (ex.: 7 dias) para prefixo `project-`
+  - `cd apps/api && npx wrangler r2 bucket lifecycle add vetoreco-dossiers dossier-ttl-7d project- --expire-days 7 --force`
+
+### Segurança
+- [ ] **APP_ORIGIN definido** (CORS)
+  - Sem `APP_ORIGIN`, a API aceita apenas `localhost`.
+- [ ] **Segredos/vars** conferidos no ambiente (Workers/Pages)
+
+### Smoke test (rápido)
+- [ ] `GET /education/topics` retorna lista
+- [ ] `GET /rtqc/dpil` retorna tabela DPIL com referência
+- [ ] `GET /climate/estimate?city=...&state=...` retorna `zone`, `method`, `confidence` + disclaimer
+- [ ] Criar projeto, anexar evidência e cálculo, e gerar dossiê:
+  - `GET /projects/:id/dossier.pdf` (primeira vez gera)
+  - repetir `GET /projects/:id/dossier.pdf` (deve vir do cache)
+- [ ] **Request ID** aparece nos erros do frontend (ex.: `ID: ...`) quando simular falha de API
+
+### Produto / comunicação
+- [ ] Texto “**não emite ENCE** / **não é motor oficial**” visível no app
+- [ ] Política de retenção: PDFs cacheados temporariamente (R2) + TTL configurado
 
 
-## Novidades da versão 0.4.2
+---
 
-- **Motor térmico rápido no frontend** (RTQ-R / RTQ-C / NBR 15575): formulário único para salvar envelope, janelas, iluminação e HVAC e rodar cálculo.
-- **Persistência térmica no D1** usando as tabelas da migration 002 (paredes, coberturas, janelas, iluminação, HVAC, cálculos e checks).
-- **Endpoints de catálogo térmico**: zonas bioclimáticas, materiais e municípios.
-- **Pré-cálculo integrado ao térmico**: se já existir cálculo térmico ele é anexado ao pré-cálculo; se houver dados térmicos salvos e ainda não houver cálculo, a API tenta rodar automaticamente em modo `auto`.
-- **Memorial e dossiê enriquecidos** com seção de resultado térmico complementar.
-- **Golden cases (admin)**:
-  - `POST /admin/golden-cases/import` para importar casos em lote (JSON)
-  - `POST /admin/golden-cases/run` para validar casos existentes e gerar relatório de acerto/erro
+## 📊 O QUE ESTA VERSÃO COMBINA
 
-## Observações importantes
+| Feature | Knowledge Packs | Fundamentos | **Híbrida** |
+|---------|----------------|-------------|-------------|
+| Checklist Oficial | ✅ | ❌ | ✅ |
+| Validações Auto | ❌ | ✅ | ✅ |
+| Conteúdo Educativo | ⚠️ | ✅ | ✅ |
+| Versionamento | ✅ | ❌ | ✅ |
+| Dossiê PDF | ⚠️ | ✅ | ✅ |
 
-- Para o módulo térmico funcionar, a migration/seed térmica (`migration_002_thermal.sql` + `seed_002_thermal.sql`) precisa ser aplicada no D1.
-- O PDF do memorial já é gerado no backend (via `pdf-lib`) e continua disponível na rota `/projects/:id/memorial.pdf`.
-- Os **golden cases normativos completos** ainda dependem da sua pesquisa/curadoria (entradas e resultados oficiais). A infraestrutura para importar e rodar já está pronta.
+---
+
+## 📖 DOCUMENTAÇÃO
+
+Consulte os arquivos em `docs/` para:
+- Conceito do produto
+- Normas e referências oficiais
+- Como preparar submissão ENCE
+- Template de memorial descritivo
+
+---
+
+## Documentos usados (e de onde vêm os números)
+
+### Fontes principais
+- **RTQ-R — Manual para Aplicação (2014)**
+- **RTQ-C — Manual para Aplicação (2016)**
+- **RAC — versão atual (PBE Edifica)**
+
+### NormPack (governança)
+As referências normativas públicas ficam centralizadas em `apps/api/src/normative_sources.ts` com um `NORMPACK_VERSION_ID` para rastreabilidade (dossiê e validações).
+
+### Números normativos implementados no código
+
+Somente estes conjuntos possuem validação numérica (todos com comentário + link público no código):
+- **U-value (paredes/coberturas)**: RTQ-R Manual 2014 — **Tabela 3.1** (PDF oficial no PBE Edifica)
+- **Ventilação mínima**: RTQ-R Manual 2014 — **Tabela 3.2** (PDF oficial no PBE Edifica)
+- **DPIL (LPD)**: RTQ-C Manual 2016 — **Tabela 4.1** (PDF oficial no PBE Edifica)
+
+Qualquer outro número exibido no app deve estar associado a uma fonte pública verificável — caso contrário, deve ser removido.
+
+**VetorEco** — guia normativo real, sem motor de ENCE, sem números inventados. 🇧🇷
 
 
-## Correções da versão 0.4.2
+## Privacidade e retenção do dossiê (PDF)
 
-- Corrigido o pipeline do cálculo térmico rápido para usar as assinaturas canônicas de `calculateRTQR` e `calculateRTQC` (evita erro de runtime ao rodar RTQ-R/RTQ-C).
-- Ajustado o cálculo automático do parâmetro AVS (estimativa a partir de sombreamento/janelas) e o particionamento de áreas permanentes/transitórias no RTQ-R.
-- Pré-cálculo agora pode disparar cálculo térmico automaticamente quando há dados térmicos salvos mas ainda não existe rodada térmica persistida.
+O VetorEco pode armazenar temporariamente o PDF do dossiê no **Cloudflare R2** para evitar reprocessamento (e reduzir consumo de CPU no Workers).
 
-## Novidades da versão 0.4.2
+- O PDF é regenerado **somente quando o projeto muda** (hash do conteúdo).
+- Recomenda-se configurar **expiração automática (TTL)** no bucket R2 (ex.: 7 dias) via Object Lifecycles.
 
-- **Curadoria de golden cases PBE Edifica incorporada ao projeto** (5 casos oficiais consolidados em JSON + seed SQL para D1).
-- **Tabela `golden_case_results` enriquecida** com metadados de curadoria (`source_url`, normativa, tipologia, ZB, qualidade, completude).
-- **Importador admin de golden cases atualizado** para aceitar o **formato do relatório** (normative + technical_inputs + expected_results) além do formato legado.
-- **Runner de golden cases com status `SKIPPED`** para casos de referência já importados cuja execução normativa completa ainda depende do motor (evita falso positivo e mantém rastreabilidade).
-- **Documentação interna adicionada** em `docs/golden-cases/` com PDF original, JSON extraído e análise.
-
-## Como usar os golden cases curados
-
-1. Aplicar o seed: `apps/api/db/seed_003_golden_cases.sql`
-2. Acessar `POST /admin/golden-cases/run`
-3. Ler o resumo:
-   - `supportedTotal`: casos que o runner consegue executar hoje
-   - `skipped`: casos já armazenados, aguardando motor normativo
-   - `failed`: casos executados com divergência
-
-> Observação: os 5 casos oficiais da curadoria entram como **referência auditável**; eles passam a virar regressão automática real à medida que os motores normativos completos forem sendo implementados.
+Veja a seção de TTL no README para os comandos do Wrangler.

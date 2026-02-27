@@ -1,17 +1,23 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vetoreco-api",
   "main": "src/index.ts",
-  "compatibility_date": "2025-01-15",
+  "compatibility_date": "2025-02-01",
   "vars": {
     "APP_ORIGIN": "http://localhost:5173",
-    "ENABLE_PDF": "true"
+    "SESSION_DAYS": "14",
+    "COOKIE_SECURE": "false"
   },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "vetoreco-db",
+      "database_name": "vetoreco",
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DOSSIERS",
+      "bucket_name": "vetoreco-dossiers"
     }
   ]
 }

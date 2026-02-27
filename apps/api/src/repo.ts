@@ -1,296 +1,419 @@
-import type {
-  CalculationRunRecord,
-  ChecklistItemRow,
-  GoldenCaseRow,
-  MembershipRow,
-  NormativePackageRow,
-  NormativeRuleRow,
-  OrganizationRow,
-  ProjectRow,
-  RegulatoryContextRow,
-  TechnicalInputs,
-  UserRow
-} from './types';
-import { nowIso, parseJsonSafe, randomId } from './utils';
+import type { Env, Stage, Typology } from './types';
+import { nowIso, sha256Hex, randomSaltB64, pbkdf2Hash } from './utils';
+import { STAGE_ORDER, stageIdx, getTemplates, isTaskActive } from './modules/journey';
 
-type AuditPayload = { userId?: string | null; projectId?: string | null; action: string; details?: unknown; requestId?: string | null };
+export class Repo {
+  constructor(private env: Env) {}
 
-export interface Repo {
-  insertAuditLog(input: AuditPayload): Promise<void>;
+  async createUser(email: string, password: string) {
+    const id = crypto.randomUUID();
+    const salt = randomSaltB64(16);
+    const hash = await pbkdf2Hash(password, salt);
+    await this.env.DB.prepare(
+      `INSERT INTO users (id, email, password_hash, password_salt) VALUES (?, ?, ?, ?)`
+    ).bind(id, email.toLowerCase(), hash, salt).run();
+    return { id, email: email.toLowerCase() };
+  }
 
-  getUserByEmail(email: string): Promise<UserRow | null>;
-  getUserById(id: string): Promise<UserRow | null>;
-  createUser(input: { email: string; password_hash: string; password_salt: string; is_super_admin?: number }): Promise<UserRow>;
+  async getUserByEmail(email: string) {
+    return await this.env.DB.prepare(`SELECT * FROM users WHERE email = ?`).bind(email.toLowerCase()).first() as any | null;
+  }
 
-  createSession(input: { user_id: string; token_hash: string; expires_at: string }): Promise<{ id: string }>;
-  getSessionByTokenHash(tokenHash: string): Promise<{ session_id: string; user_id: string; expires_at: string } | null>;
-  touchSession(id: string, lastSeenAt: string): Promise<void>;
-  deleteSession(id: string): Promise<void>;
+  async getUserById(userId: string) {
+    return await this.env.DB.prepare(`SELECT id, email, created_at FROM users WHERE id = ?`).bind(userId).first() as any | null;
+  }
 
-  createOrganization(input: { name: string; slug: string; owner_user_id: string }): Promise<OrganizationRow>;
-  addOrganizationMember(input: { organization_id: string; user_id: string; role: MembershipRow['role'] }): Promise<MembershipRow>;
-  listOrganizationsForUser(userId: string): Promise<(OrganizationRow & { role: MembershipRow['role'] })[]>;
+  async createSession(userId: string, token: string, expiresAtIso: string) {
+    const id = crypto.randomUUID();
+    const tokenHash = await sha256Hex(token);
+    await this.env.DB.prepare(
+      `INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`
+    ).bind(id, userId, tokenHash, expiresAtIso).run();
+    return { id, tokenHash };
+  }
 
-  listProjects(organizationId: string): Promise<ProjectRow[]>;
-  createProject(input: Omit<ProjectRow, 'id' | 'created_at' | 'updated_at'>): Promise<ProjectRow>;
-  getProject(projectId: string, organizationId: string): Promise<ProjectRow | null>;
-  updateProject(projectId: string, organizationId: string, patch: Partial<ProjectRow>): Promise<ProjectRow | null>;
-  deleteProject(projectId: string, organizationId: string): Promise<void>;
-  createProjectVersion(projectId: string, label: string, snapshot: unknown): Promise<void>;
+  async getSessionByToken(token: string) {
+    const tokenHash = await sha256Hex(token);
+    return await this.env.DB.prepare(`SELECT * FROM sessions WHERE token_hash = ?`).bind(tokenHash).first() as any | null;
+  }
 
-  getChecklistItems(projectId: string): Promise<ChecklistItemRow[]>;
-  upsertChecklistItems(projectId: string, items: ChecklistItemRow[]): Promise<void>;
+  async deleteSessionByToken(token: string) {
+    const tokenHash = await sha256Hex(token);
+    await this.env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(tokenHash).run();
+  }
 
-  getRegulatoryContext(projectId: string): Promise<RegulatoryContextRow | null>;
-  upsertRegulatoryContext(projectId: string, userId: string, patch: Partial<RegulatoryContextRow>): Promise<RegulatoryContextRow>;
+  async listProjects(userId: string) {
+    const r = await this.env.DB.prepare(`SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC`).bind(userId).all();
+    return (r.results ?? []) as any[];
+  }
 
-  getTechnicalInputs(projectId: string): Promise<TechnicalInputs>;
-  upsertTechnicalInputs(projectId: string, userId: string, payload: TechnicalInputs): Promise<TechnicalInputs>;
+  async getProject(userId: string, projectId: string) {
+    return await this.env.DB.prepare(`SELECT * FROM projects WHERE id = ? AND user_id = ?`).bind(projectId, userId).first() as any | null;
+  }
 
-  insertCalculationRun(input: Omit<CalculationRunRecord, 'id' | 'created_at'>): Promise<CalculationRunRecord>;
-  getLatestCalculationRun(projectId: string): Promise<CalculationRunRecord | null>;
-  listCalculationRuns(projectId: string, limit?: number): Promise<CalculationRunRecord[]>;
+  async createProject(userId: string, data: { name: string; city?: string; state?: string; typology: Typology; stage_current: Stage; area_m2?: number | null; }) {
+    const id = crypto.randomUUID();
+    const ts = nowIso();
+    await this.env.DB.prepare(
+      `INSERT INTO projects (id, user_id, name, city, state, typology, stage_current, area_m2, ence_target, profile_json, knowledge_pack_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id,
+      userId,
+      data.name,
+      data.city ?? null,
+      data.state ?? null,
+      data.typology,
+      data.stage_current,
+      data.area_m2 ?? null,
+      null,
+      null,
+      'ini_2025_05',
+      ts,
+      ts
+    ).run();
 
-  getActiveNormativePackage(date: string, mode?: string): Promise<NormativePackageRow | null>;
-  listNormativePackages(): Promise<NormativePackageRow[]>;
-  createNormativePackage(input: { code: string; title: string; mode: string; effective_from: string; effective_to?: string | null; is_active?: number; metadata_json?: string | null }): Promise<NormativePackageRow>;
-  updateNormativePackage(id: string, patch: Partial<NormativePackageRow>): Promise<NormativePackageRow | null>;
-
-  listNormativeRules(packageId?: string): Promise<NormativeRuleRow[]>;
-  createNormativeRule(input: { package_id: string; rule_key: string; title: string; sort_order?: number; criteria_json: string; outcome_json: string; effective_from: string; effective_to?: string | null; notes?: string | null; is_active?: number }): Promise<NormativeRuleRow>;
-  updateNormativeRule(id: string, patch: Partial<NormativeRuleRow>): Promise<NormativeRuleRow | null>;
-  deleteNormativeRule(id: string): Promise<void>;
-
-  listGoldenCaseResults(limit?: number): Promise<GoldenCaseRow[]>;
-  upsertGoldenCaseResult(input: Omit<GoldenCaseRow, 'id' | 'created_at' | 'updated_at'>): Promise<void>;
-}
-
-const mapProject = (r: any): ProjectRow => ({ ...r, protocol_year: Number(r.protocol_year), area_m2: r.area_m2 == null ? null : Number(r.area_m2), is_federal_public: Number(r.is_federal_public) });
-const mapCalcRun = (r: any): CalculationRunRecord => ({ ...r });
-const emptyTechnicalInputs = (): TechnicalInputs => ({ general: {}, envelope: {}, systems: {}, autodeclaration: {} });
-
-export function createD1Repo(DB: D1Database): Repo {
-  const first = async <T = any>(sql: string, params: any[] = []) => (await DB.prepare(sql).bind(...params).first<T>()) as T | null;
-  const all = async <T = any>(sql: string, params: any[] = []) => (((await DB.prepare(sql).bind(...params).all<T>()) as any).results || []) as T[];
-  const run = async (sql: string, params: any[] = []) => { await DB.prepare(sql).bind(...params).run(); };
-
-  return {
-    async insertAuditLog(input) {
-      await run(
-        `INSERT INTO audit_logs (id,user_id,project_id,action,details_json,request_id,created_at) VALUES (?,?,?,?,?,?,?)`,
-        [randomId(), input.userId || null, input.projectId || null, input.action, input.details ? JSON.stringify(input.details) : null, input.requestId || null, nowIso()]
-      );
-    },
-
-    async getUserByEmail(email) { return await first<UserRow>(`SELECT * FROM users WHERE email=?`, [email]); },
-    async getUserById(id) { return await first<UserRow>(`SELECT * FROM users WHERE id=?`, [id]); },
-    async createUser(input) {
-      const ts = nowIso(); const id = randomId();
-      await run(`INSERT INTO users (id,email,password_hash,password_salt,is_super_admin,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`,
-        [id, input.email, input.password_hash, input.password_salt, Number(input.is_super_admin || 0), ts, ts]);
-      return (await this.getUserById(id))!;
-    },
-
-    async createSession(input) {
-      const id = randomId(); const ts = nowIso();
-      await run(`INSERT INTO sessions (id,user_id,token_hash,expires_at,created_at,last_seen_at) VALUES (?,?,?,?,?,?)`, [id, input.user_id, input.token_hash, input.expires_at, ts, ts]);
-      return { id };
-    },
-    async getSessionByTokenHash(tokenHash) {
-      return await first<{ session_id: string; user_id: string; expires_at: string }>(`SELECT id as session_id,user_id,expires_at FROM sessions WHERE token_hash=?`, [tokenHash]);
-    },
-    async touchSession(id, lastSeenAt) { await run(`UPDATE sessions SET last_seen_at=? WHERE id=?`, [lastSeenAt, id]); },
-    async deleteSession(id) { await run(`DELETE FROM sessions WHERE id=?`, [id]); },
-
-    async createOrganization(input) {
-      const ts = nowIso(); const id = randomId();
-      await run(`INSERT INTO organizations (id,name,slug,owner_user_id,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
-        [id, input.name, input.slug, input.owner_user_id, ts, ts]);
-      return (await first<OrganizationRow>(`SELECT * FROM organizations WHERE id=?`, [id]))!;
-    },
-    async addOrganizationMember(input) {
-      const ts = nowIso(); const id = randomId();
-      await run(`INSERT INTO organization_members (id,organization_id,user_id,role,created_at) VALUES (?,?,?,?,?)`, [id, input.organization_id, input.user_id, input.role, ts]);
-      return (await first<MembershipRow>(`SELECT * FROM organization_members WHERE id=?`, [id]))!;
-    },
-    async listOrganizationsForUser(userId) {
-      return await all<any>(
-        `SELECT o.*, m.role FROM organizations o JOIN organization_members m ON m.organization_id=o.id WHERE m.user_id=? ORDER BY o.created_at ASC`,
-        [userId]
-      );
-    },
-
-    async listProjects(organizationId) {
-      const rows = await all<any>(`SELECT * FROM projects WHERE organization_id=? ORDER BY updated_at DESC`, [organizationId]);
-      return rows.map(mapProject);
-    },
-    async createProject(input) {
-      const id = randomId(); const ts = nowIso();
-      await run(`INSERT INTO projects (id,organization_id,user_id,name,city,state,municipality_size,typology,phase,protocol_year,area_m2,is_federal_public,notes,created_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [id, input.organization_id, input.user_id, input.name, input.city, input.state, input.municipality_size, input.typology, input.phase, input.protocol_year, input.area_m2, input.is_federal_public, input.notes, ts, ts]);
-      return (await this.getProject(id, input.organization_id))!;
-    },
-    async getProject(projectId, organizationId) {
-      const row = await first<any>(`SELECT * FROM projects WHERE id=? AND organization_id=?`, [projectId, organizationId]);
-      return row ? mapProject(row) : null;
-    },
-    async updateProject(projectId, organizationId, patch) {
-      const current = await this.getProject(projectId, organizationId);
-      if (!current) return null;
-      const next: ProjectRow = { ...current, ...patch, updated_at: nowIso() } as ProjectRow;
-      await run(`UPDATE projects SET name=?,city=?,state=?,municipality_size=?,typology=?,phase=?,protocol_year=?,area_m2=?,is_federal_public=?,notes=?,updated_at=? WHERE id=? AND organization_id=?`,
-        [next.name, next.city, next.state, next.municipality_size, next.typology, next.phase, next.protocol_year, next.area_m2, next.is_federal_public, next.notes, next.updated_at, projectId, organizationId]);
-      return (await this.getProject(projectId, organizationId))!;
-    },
-    async deleteProject(projectId, organizationId) {
-      await run(`DELETE FROM projects WHERE id=? AND organization_id=?`, [projectId, organizationId]);
-    },
-    async createProjectVersion(projectId, label, snapshot) {
-      await run(`INSERT INTO project_versions (id,project_id,label,snapshot_json,created_at) VALUES (?,?,?,?,?)`,
-        [randomId(), projectId, label, JSON.stringify(snapshot), nowIso()]);
-    },
-
-    async getChecklistItems(projectId) {
-      return await all<ChecklistItemRow>(`SELECT item_id,checked FROM project_checklist_items WHERE project_id=?`, [projectId]);
-    },
-    async upsertChecklistItems(projectId, items) {
-      for (const item of items) {
-        await run(`INSERT INTO project_checklist_items (id,project_id,item_id,checked,updated_at)
-                   VALUES (?,?,?,?,?)
-                   ON CONFLICT(project_id,item_id) DO UPDATE SET checked=excluded.checked, updated_at=excluded.updated_at`,
-          [randomId(), projectId, item.item_id, Number(item.checked), nowIso()]);
-      }
-    },
-
-    async getRegulatoryContext(projectId) {
-      return await first<RegulatoryContextRow>(`SELECT * FROM project_regulatory_context WHERE project_id=?`, [projectId]);
-    },
-    async upsertRegulatoryContext(projectId, userId, patch) {
-      const current = await this.getRegulatoryContext(projectId);
-      const ts = nowIso();
-      if (!current) {
-        const row: RegulatoryContextRow = {
-          id: randomId(),
-          project_id: projectId,
-          classification_method: 'INI',
-          protocol_date: null,
-          permit_protocol_date: null,
-          public_tender_date: null,
-          municipality_population_band: null,
-          public_entity_level: 'na',
-          is_public_building: 0,
-          requests_autodeclaration: 0,
-          legacy_reason: null,
-          legacy_ence_project_evidence: null,
-          notes: null,
-          updated_by_user_id: userId,
-          created_at: ts,
-          updated_at: ts,
-          ...patch
-        } as RegulatoryContextRow;
-        await run(`INSERT INTO project_regulatory_context (id,project_id,classification_method,protocol_date,permit_protocol_date,public_tender_date,municipality_population_band,public_entity_level,is_public_building,requests_autodeclaration,legacy_reason,legacy_ence_project_evidence,notes,updated_by_user_id,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [row.id,row.project_id,row.classification_method,row.protocol_date,row.permit_protocol_date,row.public_tender_date,row.municipality_population_band,row.public_entity_level,row.is_public_building,row.requests_autodeclaration,row.legacy_reason,row.legacy_ence_project_evidence,row.notes,row.updated_by_user_id,row.created_at,row.updated_at]);
-      } else {
-        const row = { ...current, ...patch, updated_by_user_id: userId, updated_at: ts } as RegulatoryContextRow;
-        await run(`UPDATE project_regulatory_context SET classification_method=?,protocol_date=?,permit_protocol_date=?,public_tender_date=?,municipality_population_band=?,public_entity_level=?,is_public_building=?,requests_autodeclaration=?,legacy_reason=?,legacy_ence_project_evidence=?,notes=?,updated_by_user_id=?,updated_at=? WHERE project_id=?`,
-          [row.classification_method,row.protocol_date,row.permit_protocol_date,row.public_tender_date,row.municipality_population_band,row.public_entity_level,row.is_public_building,row.requests_autodeclaration,row.legacy_reason,row.legacy_ence_project_evidence,row.notes,row.updated_by_user_id,row.updated_at,projectId]);
-      }
-      return (await this.getRegulatoryContext(projectId))!;
-    },
-
-    async getTechnicalInputs(projectId) {
-      const row = await first<{ payload_json: string }>(`SELECT payload_json FROM technical_inputs WHERE project_id=?`, [projectId]);
-      return row ? parseJsonSafe<TechnicalInputs>(row.payload_json, emptyTechnicalInputs()) : emptyTechnicalInputs();
-    },
-    async upsertTechnicalInputs(projectId, userId, payload) {
-      const exists = await first<{ id: string }>(`SELECT id FROM technical_inputs WHERE project_id=?`, [projectId]);
-      const ts = nowIso();
-      if (exists) {
-        await run(`UPDATE technical_inputs SET payload_json=?,updated_by_user_id=?,updated_at=? WHERE project_id=?`, [JSON.stringify(payload), userId, ts, projectId]);
-      } else {
-        await run(`INSERT INTO technical_inputs (id,project_id,payload_json,updated_by_user_id,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
-          [randomId(), projectId, JSON.stringify(payload), userId, ts, ts]);
-      }
-      return payload;
-    },
-
-    async insertCalculationRun(input) {
-      const id = randomId(); const ts = nowIso();
-      await run(`INSERT INTO calculation_runs (id,project_id,normative_package_id,algorithm_version,status,input_snapshot_json,output_json,created_by_user_id,created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?)`,
-        [id, input.project_id, input.normative_package_id, input.algorithm_version, input.status, input.input_snapshot_json, input.output_json, input.created_by_user_id, ts]);
-      return (await first<CalculationRunRecord>(`SELECT * FROM calculation_runs WHERE id=?`, [id]))!;
-    },
-    async getLatestCalculationRun(projectId) {
-      return await first<CalculationRunRecord>(`SELECT * FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 1`, [projectId]);
-    },
-    async listCalculationRuns(projectId, limit = 20) {
-      return await all<CalculationRunRecord>(`SELECT * FROM calculation_runs WHERE project_id=? ORDER BY created_at DESC LIMIT ?`, [projectId, Math.max(1, Math.min(limit, 100))]);
-    },
-
-    async getActiveNormativePackage(date, mode) {
-      const rows = await all<NormativePackageRow>(
-        `SELECT * FROM normative_packages WHERE is_active=1 AND (? IS NULL OR mode=?) AND effective_from<=? AND (effective_to IS NULL OR effective_to>=?) ORDER BY effective_from DESC LIMIT 1`,
-        [mode || null, mode || null, date, date]
-      );
-      return rows[0] || null;
-    },
-    async listNormativePackages() {
-      return await all<NormativePackageRow>(`SELECT * FROM normative_packages ORDER BY effective_from DESC, created_at DESC`);
-    },
-    async createNormativePackage(input) {
-      const id = randomId(); const ts = nowIso();
-      await run(`INSERT INTO normative_packages (id,code,title,mode,effective_from,effective_to,is_active,metadata_json,created_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-        [id, input.code, input.title, input.mode, input.effective_from, input.effective_to ?? null, Number(input.is_active ?? 1), input.metadata_json ?? null, ts, ts]);
-      return (await first<NormativePackageRow>(`SELECT * FROM normative_packages WHERE id=?`, [id]))!;
-    },
-    async updateNormativePackage(id, patch) {
-      const row = await first<NormativePackageRow>(`SELECT * FROM normative_packages WHERE id=?`, [id]);
-      if (!row) return null;
-      const next = { ...row, ...patch, updated_at: nowIso() };
-      await run(`UPDATE normative_packages SET code=?,title=?,mode=?,effective_from=?,effective_to=?,is_active=?,metadata_json=?,updated_at=? WHERE id=?`,
-        [next.code, next.title, next.mode, next.effective_from, next.effective_to, Number(next.is_active), next.metadata_json, next.updated_at, id]);
-      return (await first<NormativePackageRow>(`SELECT * FROM normative_packages WHERE id=?`, [id]))!;
-    },
-
-    async listNormativeRules(packageId) {
-      if (packageId) return await all<NormativeRuleRow>(`SELECT * FROM normative_rules WHERE package_id=? ORDER BY sort_order ASC, created_at ASC`, [packageId]);
-      return await all<NormativeRuleRow>(`SELECT * FROM normative_rules ORDER BY sort_order ASC, created_at ASC`);
-    },
-    async createNormativeRule(input) {
-      const id = randomId(); const ts = nowIso();
-      await run(`INSERT INTO normative_rules (id,package_id,rule_key,title,sort_order,criteria_json,outcome_json,effective_from,effective_to,is_active,notes,created_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [id, input.package_id, input.rule_key, input.title, Number(input.sort_order ?? 100), input.criteria_json, input.outcome_json, input.effective_from, input.effective_to ?? null, Number(input.is_active ?? 1), input.notes ?? null, ts, ts]);
-      return (await first<NormativeRuleRow>(`SELECT * FROM normative_rules WHERE id=?`, [id]))!;
-    },
-    async updateNormativeRule(id, patch) {
-      const row = await first<NormativeRuleRow>(`SELECT * FROM normative_rules WHERE id=?`, [id]);
-      if (!row) return null;
-      const next = { ...row, ...patch, updated_at: nowIso() };
-      await run(`UPDATE normative_rules SET package_id=?,rule_key=?,title=?,sort_order=?,criteria_json=?,outcome_json=?,effective_from=?,effective_to=?,is_active=?,notes=?,updated_at=? WHERE id=?`,
-        [next.package_id, next.rule_key, next.title, next.sort_order, next.criteria_json, next.outcome_json, next.effective_from, next.effective_to, Number(next.is_active), next.notes, next.updated_at, id]);
-      return (await first<NormativeRuleRow>(`SELECT * FROM normative_rules WHERE id=?`, [id]))!;
-    },
-    async deleteNormativeRule(id) { await run(`DELETE FROM normative_rules WHERE id=?`, [id]); },
-
-    async listGoldenCaseResults(limit = 50) {
-      return await all<GoldenCaseRow>(`SELECT * FROM golden_case_results ORDER BY updated_at DESC LIMIT ?`, [Math.max(1, Math.min(limit, 200))]);
-    },
-    async upsertGoldenCaseResult(input) {
-      const ts = nowIso();
-      const existing = await first<{ id: string }>(`SELECT id FROM golden_case_results WHERE case_key=?`, [input.case_key]);
-      if (existing) {
-        await run(`UPDATE golden_case_results SET label=?,normative_package_id=?,input_json=?,expected_output_json=?,tolerance_json=?,notes=?,updated_by_user_id=?,source_url=?,normative_code=?,building_type=?,bioclimatic_zone=?,data_quality=?,completeness_pct=?,updated_at=? WHERE case_key=?`,
-          [input.label, input.normative_package_id ?? null, input.input_json, input.expected_output_json, input.tolerance_json ?? null, input.notes ?? null, input.updated_by_user_id, (input as any).source_url ?? null, (input as any).normative_code ?? null, (input as any).building_type ?? null, (input as any).bioclimatic_zone ?? null, (input as any).data_quality ?? null, (input as any).completeness_pct ?? null, ts, input.case_key]);
-      } else {
-        await run(`INSERT INTO golden_case_results (id,case_key,label,normative_package_id,input_json,expected_output_json,tolerance_json,notes,updated_by_user_id,source_url,normative_code,building_type,bioclimatic_zone,data_quality,completeness_pct,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [randomId(), input.case_key, input.label, input.normative_package_id ?? null, input.input_json, input.expected_output_json, input.tolerance_json ?? null, input.notes ?? null, input.updated_by_user_id, (input as any).source_url ?? null, (input as any).normative_code ?? null, (input as any).building_type ?? null, (input as any).bioclimatic_zone ?? null, (input as any).data_quality ?? null, (input as any).completeness_pct ?? null, ts, ts]);
-      }
+    for (const t of getTemplates(data.typology)) {
+      await this.env.DB.prepare(
+        `INSERT INTO project_tasks (id, project_id, stage, order_index, task_key, title, description, meta_json, critical, completed, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      ).bind(
+        crypto.randomUUID(),
+        id,
+        t.stage,
+        t.order,
+        t.key,
+        t.title,
+        t.description,
+        t.meta ? JSON.stringify(t.meta) : null,
+        t.critical ? 1 : 0,
+        ts
+      ).run();
     }
-  };
+    return id;
+  }
+
+  async updateProject(userId: string, projectId: string, patch: any) {
+    const existing = await this.getProject(userId, projectId);
+    if (!existing) return null;
+    const updatedAt = nowIso();
+    await this.env.DB.prepare(
+      `UPDATE projects SET name = ?, city = ?, state = ?, stage_current = ?, area_m2 = ?, ence_target = ?, profile_json = ?, updated_at = ? WHERE id = ? AND user_id = ?`
+    ).bind(
+      patch.name ?? existing.name,
+      (patch.city === undefined) ? existing.city : patch.city,
+      (patch.state === undefined) ? existing.state : patch.state,
+      patch.stage_current ?? existing.stage_current,
+      (patch.area_m2 === undefined) ? existing.area_m2 : patch.area_m2,
+      (patch.ence_target === undefined) ? existing.ence_target : patch.ence_target,
+      (patch.profile_json === undefined) ? existing.profile_json : patch.profile_json,
+      updatedAt,
+      projectId,
+      userId
+    ).run();
+
+    // Se o perfil mudou, sincroniza tarefas de auto-check (dados mínimos)
+    if (patch.profile_json !== undefined || patch.ence_target !== undefined) {
+      await this.syncAutoTasks(userId, projectId);
+    }
+    return await this.getProject(userId, projectId);
+  }
+
+  private async syncAutoTasks(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return;
+    let profile: any = null;
+    try { profile = project.profile_json ? JSON.parse(project.profile_json) : null; } catch { profile = null; }
+
+    const hasZB = !!(profile && String(profile.bioclimatic_zone || '').trim());
+    const facades = Array.isArray(profile?.facades) ? profile.facades : [];
+    const hasFacades = facades.length > 0;
+    const hasFacadeGeometry = hasFacades && facades.every((f: any) =>
+      typeof f.azimuth_deg === 'number' && !Number.isNaN(f.azimuth_deg)
+      && typeof f.facade_area_m2 === 'number' && f.facade_area_m2 > 0
+    );
+    const hasTarget = !!String(project.ence_target || '').trim();
+
+    const autoKeys: Record<string, boolean> = {
+      project_profile_minimum: hasZB && hasFacadeGeometry,
+      site_climate: hasZB && hasFacadeGeometry,
+      set_ence_goal: hasTarget,
+    };
+
+    for (const [taskKey, okFlag] of Object.entries(autoKeys)) {
+      await this.env.DB.prepare(
+        `UPDATE project_tasks
+         SET completed = ?, updated_at = ?
+         WHERE project_id = ? AND task_key = ?`
+      ).bind(okFlag ? 1 : 0, nowIso(), projectId, taskKey).run();
+    }
+  }
+
+  async deleteProject(userId: string, projectId: string) {
+    await this.env.DB.prepare(`DELETE FROM projects WHERE id = ? AND user_id = ?`).bind(projectId, userId).run();
+  }
+
+  async listTasks(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const stageCase = STAGE_ORDER.map((s, i) => `WHEN '${s}' THEN ${i}`).join(' ');
+    const r = await this.env.DB.prepare(
+      `SELECT * FROM project_tasks WHERE project_id = ?
+       ORDER BY CASE stage ${stageCase} ELSE 999 END, order_index ASC, title ASC`
+    ).bind(projectId).all();
+    return (r.results ?? []) as any[];
+  }
+
+  async evidenceCountsByTask(userId: string, projectId: string): Promise<Record<string, number> | null> {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const r = await this.env.DB.prepare(
+      `SELECT task_id, COUNT(*) as cnt
+       FROM project_evidences
+       WHERE project_id = ? AND task_id IS NOT NULL
+       GROUP BY task_id`
+    ).bind(projectId).all();
+    const map: Record<string, number> = {};
+    for (const row of (r.results ?? []) as any[]) {
+      if (row.task_id) map[String(row.task_id)] = Number(row.cnt || 0);
+    }
+    return map;
+  }
+
+  async calcCountsByTask(userId: string, projectId: string): Promise<Record<string, number> | null> {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const r = await this.env.DB.prepare(
+      `SELECT task_id, COUNT(*) as cnt
+       FROM project_calculations
+       WHERE project_id = ? AND task_id IS NOT NULL
+       GROUP BY task_id`
+    ).bind(projectId).all();
+    const map: Record<string, number> = {};
+    for (const row of (r.results ?? []) as any[]) {
+      if (row.task_id) map[String(row.task_id)] = Number(row.cnt || 0);
+    }
+    return map;
+  }
+
+  async getTask(userId: string, projectId: string, taskId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    return await this.env.DB.prepare(
+      `SELECT * FROM project_tasks WHERE id = ? AND project_id = ?`
+    ).bind(taskId, projectId).first() as any | null;
+  }
+
+  async updateTask(userId: string, projectId: string, taskId: string, patch: { completed?: boolean; notes?: string }) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const ts = nowIso();
+    await this.env.DB.prepare(
+      `UPDATE project_tasks SET completed = COALESCE(?, completed), notes = COALESCE(?, notes), updated_at = ? WHERE id = ? AND project_id = ?`
+    ).bind(
+      patch.completed === undefined ? null : (patch.completed ? 1 : 0),
+      patch.notes === undefined ? null : patch.notes,
+      ts,
+      taskId,
+      projectId
+    ).run();
+    return true;
+  }
+
+  async listEvidences(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const r = await this.env.DB.prepare(
+      `SELECT e.*, t.title AS task_title
+       FROM project_evidences e
+       LEFT JOIN project_tasks t ON t.id = e.task_id
+       WHERE e.project_id = ?
+       ORDER BY e.created_at DESC`
+    ).bind(projectId).all();
+    return (r.results ?? []) as any[];
+  }
+
+  async addEvidence(userId: string, projectId: string, data: { stage: Stage; title: string; url: string; notes?: string; task_id?: string; evidence_type?: 'link'|'file'|'text'; content_text?: string; rac_section?: string; meta?: any }) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    if (data.task_id) {
+      const task = await this.getTask(userId, projectId, data.task_id);
+      if (!task) return null;
+    }
+    const id = crypto.randomUUID();
+    await this.env.DB.prepare(
+      `INSERT INTO project_evidences (id, project_id, task_id, stage, title, url, evidence_type, content_text, rac_section, meta_json, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id,
+      projectId,
+      data.task_id ?? null,
+      data.stage,
+      data.title,
+      data.url,
+      data.evidence_type ?? 'link',
+      data.content_text ?? null,
+      data.rac_section ?? null,
+      data.meta ? JSON.stringify(data.meta) : null,
+      data.notes ?? null
+    ).run();
+    return id;
+  }
+
+  async deleteEvidence(userId: string, projectId: string, evidenceId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    await this.env.DB.prepare(`DELETE FROM project_evidences WHERE id = ? AND project_id = ?`).bind(evidenceId, projectId).run();
+    return true;
+  }
+
+  async listCalculations(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    const r = await this.env.DB.prepare(
+      `SELECT c.*, t.title AS task_title
+       FROM project_calculations c
+       LEFT JOIN project_tasks t ON t.id = c.task_id
+       WHERE c.project_id = ?
+       ORDER BY c.created_at DESC`
+    ).bind(projectId).all();
+    return (r.results ?? []) as any[];
+  }
+
+  async addCalculation(userId: string, projectId: string, calc_type: string, inputs: any, result: any, task_id?: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    if (task_id) {
+      const task = await this.getTask(userId, projectId, task_id);
+      if (!task) return null;
+    }
+    const id = crypto.randomUUID();
+    await this.env.DB.prepare(
+      `INSERT INTO project_calculations (id, project_id, task_id, calc_type, inputs_json, result_json) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(id, projectId, task_id ?? null, calc_type, JSON.stringify(inputs), JSON.stringify(result)).run();
+    return id;
+  }
+
+  async deleteCalculation(userId: string, projectId: string, calcId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    await this.env.DB.prepare(`DELETE FROM project_calculations WHERE id = ? AND project_id = ?`).bind(calcId, projectId).run();
+    return true;
+  }
+
+  async advanceStage(userId: string, projectId: string, opts: { force?: boolean }) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return { ok: false as const, code: 'NOT_FOUND' as const };
+
+    const curr = project.stage_current as Stage;
+    const next = STAGE_ORDER[stageIdx(curr) + 1] as Stage | undefined;
+    if (!next) return { ok: false as const, code: 'NO_NEXT_STAGE' as const };
+
+    // Bloqueadores críticos consideram "preparo" (completou + evidências/cálculos exigidos).
+    const tasksRes = await this.env.DB.prepare(
+      `SELECT id, title, task_key, completed, meta_json
+       FROM project_tasks
+       WHERE project_id = ? AND stage = ? AND critical = 1
+       ORDER BY order_index ASC, title ASC`
+    ).bind(projectId, curr).all();
+    const stageTasks = (tasksRes.results ?? []) as any[];
+
+    const evMap = await this.evidenceCountsByTask(userId, projectId) || {};
+    const caMap = await this.calcCountsByTask(userId, projectId) || {};
+
+    const blockers = stageTasks
+      .map((t) => {
+        let meta: any = null;
+        try { meta = t.meta_json ? JSON.parse(t.meta_json) : null; } catch { meta = null; }
+
+        // item inativo (não aplicável) não deve bloquear etapa
+        if (!isTaskActive(meta, project)) return null;
+
+        // project profile checks (dados mínimos)
+        let profile: any = null;
+        try { profile = project.profile_json ? JSON.parse(String(project.profile_json)) : null; } catch { profile = null; }
+        const hasTarget = !!String(project.ence_target || '').trim();
+        const hasZB = !!String(profile?.bioclimatic_zone || '').trim();
+        const facades = Array.isArray(profile?.facades) ? profile.facades : [];
+        const hasFacadesMinimum = facades.length > 0 && facades.every((f: any) =>
+          typeof f.azimuth_deg === 'number' && !Number.isNaN(f.azimuth_deg)
+          && typeof f.facade_area_m2 === 'number' && f.facade_area_m2 > 0
+        );
+        const req = Array.isArray(meta?.projectFieldsRequired) ? meta.projectFieldsRequired : [];
+        const missingProjectData = req.some((k: any) => {
+          if (k === 'ence_target') return !hasTarget;
+          if (k === 'profile.bioclimatic_zone') return !hasZB;
+          if (k === 'profile.facades_minimum') return !hasFacadesMinimum;
+          return false;
+        });
+
+        const evidenceRequired = meta?.evidenceRequired ?? (!!t.critical && (meta?.evidenceHints?.length || 0) > 0);
+        const calcRequired = meta?.calcRequired ?? false;
+        const ev = evMap[String(t.id)] || 0;
+        const ca = caMap[String(t.id)] || 0;
+        const missing: string[] = [];
+        if (!t.completed) missing.push('marcar como feito');
+        if (missingProjectData) missing.push('preencher dados mínimos');
+        if (evidenceRequired && ev <= 0) missing.push('anexar evidência');
+        if (calcRequired && ca <= 0) missing.push('registrar cálculo');
+        const satisfied = !!t.completed && missing.length === 0;
+        return satisfied ? null : {
+          id: t.id,
+          title: t.title,
+          task_key: t.task_key,
+          missing,
+        };
+      })
+      .filter(Boolean) as any[];
+
+    if (blockers.length > 0 && !opts.force) {
+      return { ok: false as const, code: 'BLOCKED' as const, blockers, nextStage: next };
+    }
+
+    const updatedAt = nowIso();
+    await this.env.DB.prepare(
+      `UPDATE projects SET stage_current = ?, updated_at = ? WHERE id = ? AND user_id = ?`
+    ).bind(next, updatedAt, projectId, userId).run();
+
+    return { ok: true as const, nextStage: next, forced: blockers.length > 0 };
+  }
+
+  // === Dossier PDF cache (D1 -> R2 key) ===
+  async getDossierCache(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    return await this.env.DB.prepare(
+      `SELECT * FROM project_dossier_cache WHERE project_id = ? AND user_id = ?`
+    ).bind(projectId, userId).first() as any | null;
+  }
+
+  async upsertDossierCache(userId: string, projectId: string, data: { content_hash: string; r2_key: string; pdf_size?: number | null }) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    await this.env.DB.prepare(
+      `INSERT INTO project_dossier_cache (project_id, user_id, content_hash, r2_key, pdf_size, generated_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+       ON CONFLICT(project_id) DO UPDATE SET
+         content_hash = excluded.content_hash,
+         r2_key = excluded.r2_key,
+         pdf_size = excluded.pdf_size,
+         updated_at = datetime('now')`
+    ).bind(projectId, userId, data.content_hash, data.r2_key, data.pdf_size ?? null).run();
+    return true;
+  }
+
+  async deleteDossierCache(userId: string, projectId: string) {
+    const project = await this.getProject(userId, projectId);
+    if (!project) return null;
+    await this.env.DB.prepare(
+      `DELETE FROM project_dossier_cache WHERE project_id = ? AND user_id = ?`
+    ).bind(projectId, userId).run();
+    return true;
+  }
+
+  async audit(userId: string, action: string, projectId?: string, meta?: any) {
+    await this.env.DB.prepare(
+      `INSERT INTO audit_logs (id, user_id, project_id, action, meta_json) VALUES (?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), userId, projectId ?? null, action, meta ? JSON.stringify(meta) : null).run();
+  }
 }

@@ -13,11 +13,5 @@
       "database_name": "vetoreco",
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "DOSSIERS",
-      "bucket_name": "vetoreco-dossiers"
-    }
   ]
 }

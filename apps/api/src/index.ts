@@ -634,6 +634,7 @@ app.get('/projects/:id/dossier', requireAuth, async (c) => {
 // Status do cache do dossiê (PDF): diz se existe PDF válido e se precisa regenerar.
 app.get('/projects/:id/dossier/status', requireAuth, async (c) => {
   const requestId = c.get('requestId');
+  const hasR2 = !!c.env.DOSSIERS;
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
   if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
@@ -645,10 +646,11 @@ app.get('/projects/:id/dossier/status', requireAuth, async (c) => {
     calculations: ctx.calculations,
   });
 
-  const cached = await repo.getDossierCache(c.get('userId'), c.req.param('id'));
+  const cached = hasR2 ? await repo.getDossierCache(c.get('userId'), c.req.param('id')) : null;
   const hasCache = !!cached && !!cached.r2_key;
   const upToDate = hasCache && cached.content_hash === contentHash;
   return c.json(ok(requestId, {
+    r2Enabled: hasR2,
     contentHash,
     cached: hasCache,
     cachedHash: cached?.content_hash || null,
@@ -661,6 +663,7 @@ app.get('/projects/:id/dossier/status', requireAuth, async (c) => {
 // Gera/atualiza o PDF no R2. Por padrão só gera se o conteúdo mudou.
 app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
   const requestId = c.get('requestId');
+  const hasR2 = !!c.env.DOSSIERS;
   if (!allowPdf(c.get('userId'))) {
     return c.json(err(requestId, 'RATE_LIMITED', 'Muitas gerações de PDF em pouco tempo. Aguarde e tente novamente.'), 429);
   }
@@ -677,7 +680,7 @@ app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
     calculations: ctx.calculations,
   });
 
-  const cached = await repo.getDossierCache(c.get('userId'), c.req.param('id'));
+  const cached = hasR2 ? await repo.getDossierCache(c.get('userId'), c.req.param('id')) : null;
   const upToDate = !!cached && cached.content_hash === contentHash;
   if (upToDate && !force) {
     return c.json(ok(requestId, { status: 'cached', contentHash, r2Key: cached.r2_key, generatedAt: cached.generated_at }));
@@ -694,8 +697,16 @@ app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
   }
 
   const bytes = await buildDossierPdfBytes(ctx);
+  if (!hasR2) {
+    return c.json(ok(requestId, {
+      status: 'generated_uncached',
+      contentHash,
+      pdfSize: bytes.byteLength,
+      note: 'R2 disabled: dossier PDF generated without persistent cache.',
+    }));
+  }
   const key = dossierR2Key(c.get('userId'), c.req.param('id'), contentHash);
-  await c.env.DOSSIERS.put(key, bytes, {
+  await c.env.DOSSIERS!.put(key, bytes, {
     httpMetadata: { contentType: 'application/pdf' },
     customMetadata: { projectId: c.req.param('id'), userId: c.get('userId'), contentHash },
   });
@@ -708,6 +719,9 @@ app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
 // Faz download do PDF do R2 (somente se existir cache válido). Use /generate para criar.
 app.get('/projects/:id/dossier/download', requireAuth, async (c) => {
   const requestId = c.get('requestId');
+  if (!c.env.DOSSIERS) {
+    return c.json(err(requestId, 'FEATURE_DISABLED', 'Download via R2 cache is disabled in this environment. Use /projects/:id/dossier.pdf.'), 501);
+  }
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
   if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
@@ -748,6 +762,13 @@ app.get('/projects/:id/dossier.pdf', requireAuth, async (c) => {
     readiness: ctx.readiness,
   };
 
+  c.header('Content-Type', 'application/pdf');
+  c.header('Cache-Control', 'no-store');
+  if (!c.env.DOSSIERS) {
+    const bytes = await buildDossierPdfBytes(ctx);
+    return c.body(bytes);
+  }
+
   const res = await getOrGenerateDossierPdf({
     repo,
     bucket: c.env.DOSSIERS,
@@ -757,9 +778,6 @@ app.get('/projects/:id/dossier.pdf', requireAuth, async (c) => {
     buildPayload: async () => payload,
     buildPdfBytes: async () => await buildDossierPdfBytes(ctx),
   });
-
-  c.header('Content-Type', 'application/pdf');
-  c.header('Cache-Control', 'no-store');
   return c.body(res.bytes);
 });
 

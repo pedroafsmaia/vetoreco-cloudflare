@@ -1,7 +1,7 @@
 export type Env = {
   DB: D1Database;
   /** R2 bucket used to store generated dossier PDFs (cache) */
-  DOSSIERS: R2Bucket;
+  DOSSIERS?: R2Bucket;
   /** Comma-separated list of allowed origins for CORS. Example: https://vetoreco.pages.dev,http://localhost:5173 */
   APP_ORIGIN: string;
   SESSION_DAYS?: string;

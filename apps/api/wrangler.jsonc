@@ -3,9 +3,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-02-01",
   "vars": {
-    "APP_ORIGIN": "http://localhost:5173",
+    "APP_ORIGIN": "https://vetoreco.pages.dev",
     "SESSION_DAYS": "14",
-    "COOKIE_SECURE": "false"
+    "COOKIE_SECURE": "true"
   },
   "d1_databases": [
     {

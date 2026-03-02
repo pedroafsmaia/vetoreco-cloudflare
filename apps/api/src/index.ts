@@ -268,9 +268,9 @@ app.get('/projects/:id/journey', requireAuth, async (c) => {
     .map((t: any) => {
       const missing: string[] = [];
       if (!t.completed) missing.push('marcar como feito');
-      if (t.missing?.projectData) missing.push('preencher dados mÃ­nimos');
-      if (t.missing?.evidence) missing.push('anexar evidÃªncia');
-      if (t.missing?.calculation) missing.push('registrar cÃ¡lculo');
+      if (t.missing?.projectData) missing.push('preencher dados mínimos');
+      if (t.missing?.evidence) missing.push('anexar evidência');
+      if (t.missing?.calculation) missing.push('registrar cálculo');
       return { id: t.id, title: t.title, task_key: t.task_key, missing };
     });
 
@@ -566,9 +566,9 @@ async function buildDossierPdfBytes(ctx: any) {
       const miss: string[] = [];
       if (t.critical && !t.satisfied) {
         if (!t.completed) miss.push('marcar como feito');
-        if (t.missing?.projectData) miss.push('dados mÃ­nimos');
-        if (t.missing?.evidence) miss.push('evidÃªncia');
-        if (t.missing?.calculation) miss.push('cÃ¡lculo');
+        if (t.missing?.projectData) miss.push('dados mínimos');
+        if (t.missing?.evidence) miss.push('evidência');
+        if (t.missing?.calculation) miss.push('cálculo');
       }
       return {
         id: String(t.id),
@@ -941,12 +941,12 @@ function renderDossierHtml(d: any) {
           <b>[${t.completed ? 'x' : ' '}]</b> ${esc(t.title)} ${t.critical ? '<b style="color:#b91c1c">(crÃ­tico)</b>' : ''}
           <div class="muted">${esc(t.description || '')}</div>
           ${t.notes ? `<div class="muted">Nota: ${esc(t.notes)}</div>` : ''}
-          <div class="muted">EvidÃªncias: <b>${ev.length}</b> â€¢ CÃ¡lculos: <b>${ca.length}</b>${t.critical && !t.satisfied ? ` â€¢ <b style="color:#b91c1c">pendente</b>` : ''}</div>
+          <div class="muted">Evidências: <b>${ev.length}</b> â€¢ Cálculos: <b>${ca.length}</b>${t.critical && !t.satisfied ? ` â€¢ <b style="color:#b91c1c">pendente</b>` : ''}</div>
           ${t.critical && !t.satisfied ? `<div class="muted">Faltando: ${[
             (!t.completed ? 'marcar como feito' : null),
-            (t.missing?.projectData ? 'dados mÃ­nimos' : null),
-            (t.missing?.evidence ? 'evidÃªncia' : null),
-            (t.missing?.calculation ? 'cÃ¡lculo' : null)
+            (t.missing?.projectData ? 'dados mínimos' : null),
+            (t.missing?.evidence ? 'evidência' : null),
+            (t.missing?.calculation ? 'cálculo' : null)
           ].filter(Boolean).map(esc).join(', ')}</div>` : ''}
           ${refs.length ? `<div class="muted">ReferÃªncias: ${refs.map((r:any)=>r.url?`<a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.title)}</a>`:esc(r.title)).join(' â€¢ ')}</div>` : ''}
         </li>`;

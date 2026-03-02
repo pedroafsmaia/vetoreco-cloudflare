@@ -49,7 +49,8 @@ export async function pbkdf2Hash(password: string, saltB64: string): Promise<str
     ['deriveBits']
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 120000 },
+    // Cloudflare Workers currently supports up to 100000 iterations for PBKDF2.
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
     key,
     256
   );

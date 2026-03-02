@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+﻿import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Env } from './types';
 import { authRoutes, requireAuth } from './auth';
@@ -16,9 +16,9 @@ import { readJsonLimited, MAX_BODY_BYTES, clampStr, isValidUF, LIMITS } from './
 
 const app = new Hono<{ Bindings: Env; Variables: { userId: string; requestId: string } }>();
 
-// Observabilidade mínima:
+// Observabilidade mÃ­nima:
 // - requestId por request (retornado em X-Request-Id e em toda resposta JSON)
-// - log estruturado com duração, rota, status
+// - log estruturado com duraÃ§Ã£o, rota, status
 // - onError padronizado (evita respostas "sem id")
 app.use('*', async (c, next) => {
   const rid = reqId();
@@ -54,16 +54,16 @@ app.onError((e: any, c) => {
     stack: e?.stack,
   }));
   c.header('X-Request-Id', rid);
-  return c.json(err(rid, 'INTERNAL_ERROR', 'Erro interno. Se persistir, contate o suporte com o ID da requisição.'), 500);
+  return c.json(err(rid, 'INTERNAL_ERROR', 'Erro interno. Se persistir, contate o suporte com o ID da requisiÃ§Ã£o.'), 500);
 });
 
 app.notFound((c) => {
   const rid = c.get('requestId') || reqId();
   c.header('X-Request-Id', rid);
-  return c.json(err(rid, 'NOT_FOUND', 'Rota não encontrada.'), 404);
+  return c.json(err(rid, 'NOT_FOUND', 'Rota nÃ£o encontrada.'), 404);
 });
 
-// Rate limit simples (por instância) para geração de PDF do dossiê.
+// Rate limit simples (por instÃ¢ncia) para geraÃ§Ã£o de PDF do dossiÃª.
 // Objetivo: evitar abuso acidental sem introduzir infraestrutura extra.
 const pdfRate: Map<string, number[]> = new Map();
 function allowPdf(userId: string, limit = 3, windowMs = 60_000) {
@@ -75,19 +75,31 @@ function allowPdf(userId: string, limit = 3, windowMs = 60_000) {
   return true;
 }
 
-// Limite simples de payload por Content-Length (melhor esforço)
-// Observação: requests sem Content-Length (chunked) ainda serão limitados por validações e clamps.
+// Limite simples de payload por Content-Length (melhor esforÃ§o)
+// ObservaÃ§Ã£o: requests sem Content-Length (chunked) ainda serÃ£o limitados por validaÃ§Ãµes e clamps.
+// Validacoes simples para evitar payloads malformados e abuso acidental.
+const parseOrigins = (raw: string | undefined): string[] => {
+  const defaults = ['http://localhost:5173'];
+  if (!raw || !raw.trim()) return defaults;
+  const parsed = raw
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return parsed.length ? parsed : defaults;
+};
 
-// Validações simples para evitar payloads malformados e abuso acidental.
+app.use('*', cors({
+  origin: (origin, c) => {
+    const allowlist = parseOrigins(c.env.APP_ORIGIN);
     if (origin && allowlist.includes(origin)) return origin;
     return allowlist[0];
   },
   credentials: true,
   allowHeaders: ['Content-Type'],
-  allowMethods: ['GET','POST','PUT','DELETE','OPTIONS']
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }));
 
-// Headers básicos de segurança (ajuda a evitar problemas comuns em produção)
+// Headers bÃ¡sicos de seguranÃ§a (ajuda a evitar problemas comuns em produÃ§Ã£o)
 app.use('*', async (c, next) => {
   await next();
   c.header('X-Content-Type-Options', 'nosniff');
@@ -140,7 +152,7 @@ app.post('/projects', requireAuth, async (c) => {
   const state = body.state ? clampStr(body.state, 2).toUpperCase() : '';
 
   if (!name || !typology || !stage_current) return c.json(err(requestId, 'INVALID_INPUT', 'Informe nome, tipologia e etapa atual.'), 400);
-  if (state && !isValidUF(state)) return c.json(err(requestId, 'INVALID_INPUT', 'UF inválida. Use 2 letras (ex.: SP).'), 400);
+  if (state && !isValidUF(state)) return c.json(err(requestId, 'INVALID_INPUT', 'UF invÃ¡lida. Use 2 letras (ex.: SP).'), 400);
 
   const repo = new Repo(c.env);
   const id = await repo.createProject(c.get('userId'), {
@@ -160,7 +172,7 @@ app.get('/projects/:id', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const project = await repo.getProject(c.get('userId'), c.req.param('id'));
-  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   return c.json(ok(requestId, { project }));
 });
 
@@ -171,18 +183,18 @@ app.put('/projects/:id', requireAuth, async (c) => {
     return c.json(err(requestId, 'PAYLOAD_TOO_LARGE', 'Payload muito grande. Reduza os campos e tente novamente.'), 413);
   }
 
-  // Sanitização básica de strings (evita payloads enormes e estados inválidos)
+  // SanitizaÃ§Ã£o bÃ¡sica de strings (evita payloads enormes e estados invÃ¡lidos)
   if (body.name !== undefined) body.name = clampStr(body.name, LIMITS.projectName);
   if (body.city !== undefined) body.city = clampStr(body.city, LIMITS.city) || null;
   if (body.state !== undefined) {
     const uf = clampStr(body.state, 2).toUpperCase();
-    if (uf && !isValidUF(uf)) return c.json(err(requestId, 'INVALID_INPUT', 'UF inválida. Use 2 letras (ex.: SP).'), 400);
+    if (uf && !isValidUF(uf)) return c.json(err(requestId, 'INVALID_INPUT', 'UF invÃ¡lida. Use 2 letras (ex.: SP).'), 400);
     body.state = uf || null;
   }
 
   const repo = new Repo(c.env);
   const updated = await repo.updateProject(c.get('userId'), c.req.param('id'), body);
-  if (!updated) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!updated) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   await repo.audit(c.get('userId'), 'project.update', c.req.param('id'));
   return c.json(ok(requestId, { project: updated }));
 });
@@ -199,7 +211,7 @@ app.get('/projects/:id/journey', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const project = await repo.getProject(c.get('userId'), c.req.param('id'));
-  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   const taskRows = await repo.listTasks(c.get('userId'), c.req.param('id')) || [];
 
   const evCounts = await repo.evidenceCountsByTask(c.get('userId'), c.req.param('id')) || {};
@@ -248,9 +260,9 @@ app.get('/projects/:id/journey', requireAuth, async (c) => {
     .map((t: any) => {
       const missing: string[] = [];
       if (!t.completed) missing.push('marcar como feito');
-      if (t.missing?.projectData) missing.push('preencher dados mínimos');
-      if (t.missing?.evidence) missing.push('anexar evidência');
-      if (t.missing?.calculation) missing.push('registrar cálculo');
+      if (t.missing?.projectData) missing.push('preencher dados mÃ­nimos');
+      if (t.missing?.evidence) missing.push('anexar evidÃªncia');
+      if (t.missing?.calculation) missing.push('registrar cÃ¡lculo');
       return { id: t.id, title: t.title, task_key: t.task_key, missing };
     });
 
@@ -298,7 +310,7 @@ app.put('/projects/:id/tasks/:taskId', requireAuth, async (c) => {
   }
   const repo = new Repo(c.env);
   const res = await repo.updateTask(c.get('userId'), c.req.param('id'), c.req.param('taskId'), { completed: body.completed, notes: body.notes });
-  if (!res) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!res) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   await repo.audit(c.get('userId'), 'task.update', c.req.param('id'), { taskId: c.req.param('taskId') });
   return c.json(ok(requestId, { ok: true }));
 });
@@ -313,15 +325,15 @@ app.post('/projects/:id/stage/advance', requireAuth, async (c) => {
   const repo = new Repo(c.env);
   const res = await repo.advanceStage(c.get('userId'), c.req.param('id'), { force });
   if (!res.ok) {
-    if (res.code === 'NOT_FOUND') return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
-    if (res.code === 'NO_NEXT_STAGE') return c.json(err(requestId, 'NO_NEXT_STAGE', 'O projeto já está na última etapa.'), 409);
+    if (res.code === 'NOT_FOUND') return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
+    if (res.code === 'NO_NEXT_STAGE') return c.json(err(requestId, 'NO_NEXT_STAGE', 'O projeto jÃ¡ estÃ¡ na Ãºltima etapa.'), 409);
     if (res.code === 'BLOCKED') {
-      return c.json(err(requestId, 'STAGE_BLOCKED', 'Existem itens críticos pendentes na etapa atual.', {
+      return c.json(err(requestId, 'STAGE_BLOCKED', 'Existem itens crÃ­ticos pendentes na etapa atual.', {
         blockers: (res as any).blockers,
         nextStage: (res as any).nextStage,
       }), 409);
     }
-    return c.json(err(requestId, 'ADVANCE_FAILED', 'Não foi possível avançar etapa.'), 400);
+    return c.json(err(requestId, 'ADVANCE_FAILED', 'NÃ£o foi possÃ­vel avanÃ§ar etapa.'), 400);
   }
   await repo.audit(c.get('userId'), 'project.stage.advance', c.req.param('id'), { nextStage: res.nextStage, forced: res.forced });
   const project = await repo.getProject(c.get('userId'), c.req.param('id'));
@@ -332,7 +344,7 @@ app.get('/projects/:id/evidences', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const evidences = await repo.listEvidences(c.get('userId'), c.req.param('id'));
-  if (!evidences) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!evidences) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   return c.json(ok(requestId, { evidences }));
 });
 
@@ -354,13 +366,13 @@ app.post('/projects/:id/evidences', requireAuth, async (c) => {
   const url = isText ? 'about:blank' : (body.url ? String(body.url) : '');
 
   if (!stage || !title || (!isText && !url)) {
-    return c.json(err(requestId, 'INVALID_INPUT', 'Informe etapa, título e URL (ou texto, quando for evidência textual).'), 400);
+    return c.json(err(requestId, 'INVALID_INPUT', 'Informe etapa, tÃ­tulo e URL (ou texto, quando for evidÃªncia textual).'), 400);
   }
   if (isText && !content_text) {
-    return c.json(err(requestId, 'INVALID_INPUT', 'Para evidência textual, informe o conteúdo.'), 400);
+    return c.json(err(requestId, 'INVALID_INPUT', 'Para evidÃªncia textual, informe o conteÃºdo.'), 400);
   }
   if (!isText && !isSafeHttpUrl(url)) {
-    return c.json(err(requestId, 'INVALID_INPUT', 'URL inválida. Use http/https.'), 400);
+    return c.json(err(requestId, 'INVALID_INPUT', 'URL invÃ¡lida. Use http/https.'), 400);
   }
 
   const repo = new Repo(c.env);
@@ -375,7 +387,7 @@ app.post('/projects/:id/evidences', requireAuth, async (c) => {
     notes,
     task_id: body.task_id ? String(body.task_id) : undefined,
   });
-  if (!id) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!id) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   await repo.audit(c.get('userId'), 'evidence.add', c.req.param('id'), { evidenceId: id });
   return c.json(ok(requestId, { id }), 201);
 });
@@ -384,7 +396,7 @@ app.delete('/projects/:id/evidences/:evidenceId', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const res = await repo.deleteEvidence(c.get('userId'), c.req.param('id'), c.req.param('evidenceId'));
-  if (!res) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!res) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   await repo.audit(c.get('userId'), 'evidence.delete', c.req.param('id'), { evidenceId: c.req.param('evidenceId') });
   return c.json(ok(requestId, { ok: true }));
 });
@@ -393,7 +405,7 @@ app.get('/projects/:id/calculations', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const calculations = await repo.listCalculations(c.get('userId'), c.req.param('id'));
-  if (!calculations) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!calculations) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   return c.json(ok(requestId, { calculations }));
 });
 
@@ -408,7 +420,7 @@ app.post('/projects/:id/calculations/run', requireAuth, async (c) => {
   const taskId = body.task_id ? String(body.task_id) : undefined;
   if (!type || !inputs) return c.json(err(requestId, 'INVALID_INPUT', 'Informe type e inputs.'), 400);
 
-  // Limita o tamanho do payload armazenado (evita dossiê gigante / abuso acidental)
+  // Limita o tamanho do payload armazenado (evita dossiÃª gigante / abuso acidental)
   const inputsStr = JSON.stringify(inputs ?? {});
   if (inputsStr.length > LIMITS.calcJsonBytes) {
     return c.json(err(requestId, 'INVALID_INPUT', 'Inputs muito grandes para registrar. Reduza os campos/itens e tente novamente.'), 400);
@@ -422,9 +434,9 @@ app.post('/projects/:id/calculations/run', requireAuth, async (c) => {
     else if (type === 'avs') result = calcAVS(inputs);
     else if (type === 'lpd') result = calcLPD(inputs);
     else if (type === 'lpd_spaces') result = calcLPDSpaces(inputs);
-    else return c.json(err(requestId, 'INVALID_INPUT', 'Tipo inválido.'), 400);
+    else return c.json(err(requestId, 'INVALID_INPUT', 'Tipo invÃ¡lido.'), 400);
   } catch (e: any) {
-    return c.json(err(requestId, 'CALC_ERROR', e?.message || 'Erro no cálculo.'), 400);
+    return c.json(err(requestId, 'CALC_ERROR', e?.message || 'Erro no cÃ¡lculo.'), 400);
   }
 
   const resultStr = JSON.stringify(result ?? {});
@@ -434,16 +446,16 @@ app.post('/projects/:id/calculations/run', requireAuth, async (c) => {
 
   const repo = new Repo(c.env);
   const id = await repo.addCalculation(c.get('userId'), c.req.param('id'), String(type), inputs, result, taskId);
-  if (!id) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!id) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   await repo.audit(c.get('userId'), 'calculation.run', c.req.param('id'), { type });
   return c.json(ok(requestId, { id, result }), 201);
 });
 
 // === Dossier cache (R2) ===
-// Estratégia:
-// - Calcula um hash estável do conteúdo relevante do projeto (dados + tarefas + evidências + cálculos)
-// - Se o hash bater com o último PDF gerado, retorna do R2 sem regenerar
-// - Caso contrário, gera novamente, salva no R2 e atualiza D1
+// EstratÃ©gia:
+// - Calcula um hash estÃ¡vel do conteÃºdo relevante do projeto (dados + tarefas + evidÃªncias + cÃ¡lculos)
+// - Se o hash bater com o Ãºltimo PDF gerado, retorna do R2 sem regenerar
+// - Caso contrÃ¡rio, gera novamente, salva no R2 e atualiza D1
 const DOSSIER_COOLDOWN_MS = 120_000; // 2 min por projeto (anti-spam)
 
 async function buildDossierContext(repo: Repo, userId: string, projectId: string) {
@@ -455,7 +467,7 @@ async function buildDossierContext(repo: Repo, userId: string, projectId: string
   const evCounts = await repo.evidenceCountsByTask(userId, projectId) || {};
   const caCounts = await repo.calcCountsByTask(userId, projectId) || {};
 
-  // Normaliza tarefas para cálculo de satisfação
+  // Normaliza tarefas para cÃ¡lculo de satisfaÃ§Ã£o
   const tasks = taskRows.map((t: any) => {
     let meta: any = null;
     try { meta = t.meta_json ? JSON.parse(t.meta_json) : null; } catch { meta = null; }
@@ -546,9 +558,9 @@ async function buildDossierPdfBytes(ctx: any) {
       const miss: string[] = [];
       if (t.critical && !t.satisfied) {
         if (!t.completed) miss.push('marcar como feito');
-        if (t.missing?.projectData) miss.push('dados mínimos');
-        if (t.missing?.evidence) miss.push('evidência');
-        if (t.missing?.calculation) miss.push('cálculo');
+        if (t.missing?.projectData) miss.push('dados mÃ­nimos');
+        if (t.missing?.evidence) miss.push('evidÃªncia');
+        if (t.missing?.calculation) miss.push('cÃ¡lculo');
       }
       return {
         id: String(t.id),
@@ -564,8 +576,8 @@ async function buildDossierPdfBytes(ctx: any) {
     }),
     normativeBase: [
       ...(Array.isArray(pack?.sources) ? pack.sources : []),
-      { title: 'Manual RTQ-R (2014) — Tabelas 3.1 e 3.2', url: 'https://www.pbeedifica.com.br/sites/default/files/projetos/etiquetagem/residencial/downloads/Manual_RTQR_102014.pdf' },
-      { title: 'Manual RTQ-C (2016) — Tabela 4.1 (DPIL)', url: 'https://www.pbeedifica.com.br/sites/default/files/projetos/etiquetagem/comercial/downloads/manual_rtqc2016.pdf' },
+      { title: 'Manual RTQ-R (2014) â€” Tabelas 3.1 e 3.2', url: 'https://www.pbeedifica.com.br/sites/default/files/projetos/etiquetagem/residencial/downloads/Manual_RTQR_102014.pdf' },
+      { title: 'Manual RTQ-C (2016) â€” Tabela 4.1 (DPIL)', url: 'https://www.pbeedifica.com.br/sites/default/files/projetos/etiquetagem/comercial/downloads/manual_rtqc2016.pdf' },
       { title: 'Manual RAC (maio/2025)', url: 'https://pbeedifica.com.br/sites/default/files/manuais/Manual%20RAC_novo%20formato_maio25.pdf' },
     ],
   };
@@ -577,7 +589,7 @@ app.get('/projects/:id/dossier', requireAuth, async (c) => {
   const format = c.req.query('format') || 'json';
   const repo = new Repo(c.env);
   const project = await repo.getProject(c.get('userId'), c.req.param('id'));
-  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
   const taskRows = await repo.listTasks(c.get('userId'), c.req.param('id')) || [];
   const evidences = await repo.listEvidences(c.get('userId'), c.req.param('id')) || [];
   const calculations = await repo.listCalculations(c.get('userId'), c.req.param('id')) || [];
@@ -631,13 +643,13 @@ app.get('/projects/:id/dossier', requireAuth, async (c) => {
   return c.json(ok(requestId, { dossier }));
 });
 
-// Status do cache do dossiê (PDF): diz se existe PDF válido e se precisa regenerar.
+// Status do cache do dossiÃª (PDF): diz se existe PDF vÃ¡lido e se precisa regenerar.
 app.get('/projects/:id/dossier/status', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const hasR2 = !!c.env.DOSSIERS;
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
-  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
 
   const contentHash = await computeDossierContentHash({
     project: ctx.project,
@@ -660,18 +672,18 @@ app.get('/projects/:id/dossier/status', requireAuth, async (c) => {
   }));
 });
 
-// Gera/atualiza o PDF no R2. Por padrão só gera se o conteúdo mudou.
+// Gera/atualiza o PDF no R2. Por padrÃ£o sÃ³ gera se o conteÃºdo mudou.
 app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const hasR2 = !!c.env.DOSSIERS;
   if (!allowPdf(c.get('userId'))) {
-    return c.json(err(requestId, 'RATE_LIMITED', 'Muitas gerações de PDF em pouco tempo. Aguarde e tente novamente.'), 429);
+    return c.json(err(requestId, 'RATE_LIMITED', 'Muitas geraÃ§Ãµes de PDF em pouco tempo. Aguarde e tente novamente.'), 429);
   }
 
   const force = String(c.req.query('force') || '').toLowerCase() === 'true';
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
-  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
 
   const contentHash = await computeDossierContentHash({
     project: ctx.project,
@@ -686,7 +698,7 @@ app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
     return c.json(ok(requestId, { status: 'cached', contentHash, r2Key: cached.r2_key, generatedAt: cached.generated_at }));
   }
 
-  // Cooldown por projeto (evita spam mesmo com rate limit por usuário)
+  // Cooldown por projeto (evita spam mesmo com rate limit por usuÃ¡rio)
   if (!force && cached?.updated_at) {
     const last = Date.parse(String(cached.updated_at));
     if (Number.isFinite(last) && (Date.now() - last) < DOSSIER_COOLDOWN_MS) {
@@ -716,7 +728,7 @@ app.post('/projects/:id/dossier/generate', requireAuth, async (c) => {
   return c.json(ok(requestId, { status: 'generated', contentHash, r2Key: key, pdfSize: bytes.byteLength }));
 });
 
-// Faz download do PDF do R2 (somente se existir cache válido). Use /generate para criar.
+// Faz download do PDF do R2 (somente se existir cache vÃ¡lido). Use /generate para criar.
 app.get('/projects/:id/dossier/download', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   if (!c.env.DOSSIERS) {
@@ -724,7 +736,7 @@ app.get('/projects/:id/dossier/download', requireAuth, async (c) => {
   }
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
-  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
 
   const contentHash = await computeDossierContentHash({
     project: ctx.project,
@@ -735,12 +747,12 @@ app.get('/projects/:id/dossier/download', requireAuth, async (c) => {
 
   const cached = await repo.getDossierCache(c.get('userId'), c.req.param('id'));
   if (!cached?.r2_key) return c.json(err(requestId, 'NOT_READY', 'Nenhum PDF gerado ainda. Use /dossier/generate.'), 409);
-  if (cached.content_hash !== contentHash) return c.json(err(requestId, 'STALE', 'O PDF está desatualizado. Gere novamente.'), 409);
+  if (cached.content_hash !== contentHash) return c.json(err(requestId, 'STALE', 'O PDF estÃ¡ desatualizado. Gere novamente.'), 409);
 
   const obj = await c.env.DOSSIERS.get(cached.r2_key);
   if (!obj) {
     await repo.deleteDossierCache(c.get('userId'), c.req.param('id'));
-    return c.json(err(requestId, 'NOT_FOUND', 'Cache não encontrado. Gere novamente.'), 404);
+    return c.json(err(requestId, 'NOT_FOUND', 'Cache nÃ£o encontrado. Gere novamente.'), 404);
   }
   const bytes = await obj.arrayBuffer();
   c.header('Content-Type', 'application/pdf');
@@ -752,7 +764,7 @@ app.get('/projects/:id/dossier.pdf', requireAuth, async (c) => {
   const requestId = c.get('requestId');
   const repo = new Repo(c.env);
   const ctx = await buildDossierContext(repo, c.get('userId'), c.req.param('id'));
-  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
+  if (!ctx) return c.json(err(requestId, 'NOT_FOUND', 'Projeto nÃ£o encontrado.'), 404);
 
   const payload = {
     project: ctx.project,
@@ -803,7 +815,7 @@ function renderDossierHtml(d: any) {
     { key: 'study', label: 'Estudo' },
     { key: 'anteproject', label: 'Anteprojeto' },
     { key: 'executive', label: 'Executivo' },
-    { key: 'construction', label: 'Obra (Construído)' },
+    { key: 'construction', label: 'Obra (ConstruÃ­do)' },
   ];
 
   const tasksByStage: Record<string, any[]> = {};
@@ -811,7 +823,7 @@ function renderDossierHtml(d: any) {
 
   const missingCriticalProject = (d.tasks || []).filter((t: any) => (t.stage !== 'construction') && t.critical && !t.satisfied);
 
-  return `<!doctype html><html><head><meta charset="utf-8"/><title>Dossiê — ${esc(d.project.name)}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"/><title>DossiÃª â€” ${esc(d.project.name)}</title>
   <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 12px;color:#0f172a}
   .card{border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:12px 0;background:#fff}
@@ -825,22 +837,22 @@ function renderDossierHtml(d: any) {
   .kpi{display:flex;gap:10px;flex-wrap:wrap}
   .kpi .pill{border:1px solid #e2e8f0;border-radius:999px;padding:6px 10px}
   </style></head><body>
-  <h1>VetorEco — Dossiê de Preparação</h1>
+  <h1>VetorEco â€” DossiÃª de PreparaÃ§Ã£o</h1>
   <p class="muted">Gerado em ${esc(d.generated_at)}</p>
 
   <div class="card"><h2>Projeto</h2>
     <p><b>${esc(d.project.name)}</b></p>
-    <p class="muted">Cidade/UF: ${esc(d.project.city || '-')} / ${esc(d.project.state || '-')} • Tipologia: ${esc(d.project.typology)} • Etapa: ${esc(d.project.stage_current)}</p>
-    <p class="muted">Meta (VetorEco): <b>${esc(d.project.ence_target || '-')}</b> • Zona bioclimática: <b>${esc((() => { try { return d.project.profile_json ? (JSON.parse(d.project.profile_json).bioclimatic_zone || '-') : '-'; } catch { return '-'; } })())}</b></p>
+    <p class="muted">Cidade/UF: ${esc(d.project.city || '-')} / ${esc(d.project.state || '-')} â€¢ Tipologia: ${esc(d.project.typology)} â€¢ Etapa: ${esc(d.project.stage_current)}</p>
+    <p class="muted">Meta (VetorEco): <b>${esc(d.project.ence_target || '-')}</b> â€¢ Zona bioclimÃ¡tica: <b>${esc((() => { try { return d.project.profile_json ? (JSON.parse(d.project.profile_json).bioclimatic_zone || '-') : '-'; } catch { return '-'; } })())}</b></p>
   </div>
 
   <div class="card"><h2>Base do guia (normas e processo)</h2>
     <p class="muted">Pacote de conhecimento do projeto: <code>${esc(d.knowledge?.project_pack_id || d.knowledge?.pack?.id || '-')}</code></p>
-    <p class="muted">O VetorEco não emite ENCE. Ele transforma o processo e os manuais em checklist + evidências para reduzir retrabalho.</p>
+    <p class="muted">O VetorEco nÃ£o emite ENCE. Ele transforma o processo e os manuais em checklist + evidÃªncias para reduzir retrabalho.</p>
     ${(() => {
       const src = Array.isArray(d.knowledge?.pack?.sources) ? d.knowledge.pack.sources : [];
       if (!src.length) return '';
-      const items = src.slice(0, 8).map((s:any)=>`<li><a href="${esc(s.url||'#')}" target="_blank" rel="noreferrer">${esc(s.title)}</a>${s.section ? ' — ' + esc(s.section) : ''}</li>`).join('');
+      const items = src.slice(0, 8).map((s:any)=>`<li><a href="${esc(s.url||'#')}" target="_blank" rel="noreferrer">${esc(s.title)}</a>${s.section ? ' â€” ' + esc(s.section) : ''}</li>`).join('');
       return `<ul class="muted">${items}</ul>`;
     })()}
     ${(() => {
@@ -853,35 +865,35 @@ function renderDossierHtml(d: any) {
         <div class=\"muted\" style=\"margin-top:10px\"><b>Estrutura sugerida de anexos</b></div>
         <div class=\"grid2\" style=\"gap:10px\">
           <div><div class=\"muted\"><b>Pacote ENCE de Projeto</b></div>${ul(proj)}</div>
-          <div><div class=\"muted\"><b>Pacote ENCE do Construído</b></div>${ul(built)}</div>
+          <div><div class=\"muted\"><b>Pacote ENCE do ConstruÃ­do</b></div>${ul(built)}</div>
         </div>
       `;
     })()}
     ${(() => {
       const mt = d.knowledge?.pack?.memorial_templates;
       if (!mt) return '';
-      const sec = (arr:any[]) => (Array.isArray(arr)?arr:[]).map((s:any)=>`<li><b>${esc(s.title)}</b> — ${esc((s.hints||[]).join(' • '))}</li>`).join('');
+      const sec = (arr:any[]) => (Array.isArray(arr)?arr:[]).map((s:any)=>`<li><b>${esc(s.title)}</b> â€” ${esc((s.hints||[]).join(' â€¢ '))}</li>`).join('');
       const proj = sec(mt.project?.sections);
       const built = sec(mt.built?.sections);
       return `
         <div class=\"muted\" style=\"margin-top:10px\"><b>Template de memorial (rascunho guiado)</b></div>
-        <div class=\"muted\">Use como guia para preencher o memorial e anexar evidências. Não substitui o processo oficial.</div>
+        <div class=\"muted\">Use como guia para preencher o memorial e anexar evidÃªncias. NÃ£o substitui o processo oficial.</div>
         <div class=\"grid2\" style=\"gap:10px\">
           <div><div class=\"muted\"><b>Projeto</b></div><ul class=\"muted\">${proj}</ul></div>
-          <div><div class=\"muted\"><b>Construído</b></div><ul class=\"muted\">${built}</ul></div>
+          <div><div class=\"muted\"><b>ConstruÃ­do</b></div><ul class=\"muted\">${built}</ul></div>
         </div>
       `;
     })()}
   </div>
 
-  <div class="card"><h2>Fachadas (perfil técnico)</h2>
+  <div class="card"><h2>Fachadas (perfil tÃ©cnico)</h2>
     ${facades.length ? `
       <table style="width:100%;border-collapse:collapse">
         <thead><tr>
           <th style="text-align:left;border-bottom:1px solid #e2e8f0;padding:6px">Fachada</th>
-          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Azimute (°)</th>
-          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Área fachada (m²)</th>
-          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Área janelas (m²)</th>
+          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Azimute (Â°)</th>
+          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Ãrea fachada (mÂ²)</th>
+          <th style="text-align:right;border-bottom:1px solid #e2e8f0;padding:6px">Ãrea janelas (mÂ²)</th>
         </tr></thead>
         <tbody>
           ${facades.map((f:any)=>`<tr>
@@ -893,19 +905,19 @@ function renderDossierHtml(d: any) {
         </tbody>
       </table>
     ` : `<p class="muted">Sem fachadas preenchidas no perfil.</p>`}
-    <p class="muted">Use estes dados para controlar WWR/PAF por fachada e reduzir retrabalho na revisão.</p>
+    <p class="muted">Use estes dados para controlar WWR/PAF por fachada e reduzir retrabalho na revisÃ£o.</p>
   </div>
 
-  <div class="card"><h2>Prontidão</h2>
+  <div class="card"><h2>ProntidÃ£o</h2>
     <div class="kpi">
-      <div class="pill"><b>ENCE de Projeto</b> — <span class="badge ${badgeClass(badgeP)}">${esc(String(badgeP).toUpperCase())}</span> <b>${esc(d.readiness.enceProjeto.progressPct)}%</b> • críticos: <b>${esc(d.readiness.enceProjeto.criticalMissing)}</b></div>
-      <div class="pill"><b>Construído</b> — <span class="badge ${badgeClass(badgeB)}">${esc(String(badgeB).toUpperCase())}</span> <b>${esc(d.readiness.enceConstruido.progressPct)}%</b> • críticos: <b>${esc(d.readiness.enceConstruido.criticalMissing)}</b></div>
+      <div class="pill"><b>ENCE de Projeto</b> â€” <span class="badge ${badgeClass(badgeP)}">${esc(String(badgeP).toUpperCase())}</span> <b>${esc(d.readiness.enceProjeto.progressPct)}%</b> â€¢ crÃ­ticos: <b>${esc(d.readiness.enceProjeto.criticalMissing)}</b></div>
+      <div class="pill"><b>ConstruÃ­do</b> â€” <span class="badge ${badgeClass(badgeB)}">${esc(String(badgeB).toUpperCase())}</span> <b>${esc(d.readiness.enceConstruido.progressPct)}%</b> â€¢ crÃ­ticos: <b>${esc(d.readiness.enceConstruido.criticalMissing)}</b></div>
     </div>
-    <p class="muted">A prontidão indica se o projeto está preparado (dados + evidências + cálculos auxiliares) para reduzir retrabalho antes do processo oficial.</p>
+    <p class="muted">A prontidÃ£o indica se o projeto estÃ¡ preparado (dados + evidÃªncias + cÃ¡lculos auxiliares) para reduzir retrabalho antes do processo oficial.</p>
   </div>
 
-  <div class="card"><h2>Pendências críticas (Projeto)</h2>
-    ${missingCriticalProject.length ? `<ul>${missingCriticalProject.map((t:any)=>`<li><b>${esc(t.title)}</b> <span class="muted">(${esc(t.stage)})</span></li>`).join('')}</ul>` : `<p class="muted">Sem pendências críticas para ENCE de Projeto.</p>`}
+  <div class="card"><h2>PendÃªncias crÃ­ticas (Projeto)</h2>
+    ${missingCriticalProject.length ? `<ul>${missingCriticalProject.map((t:any)=>`<li><b>${esc(t.title)}</b> <span class="muted">(${esc(t.stage)})</span></li>`).join('')}</ul>` : `<p class="muted">Sem pendÃªncias crÃ­ticas para ENCE de Projeto.</p>`}
   </div>
 
   <div class="card"><h2>Checklist por etapa</h2>
@@ -918,24 +930,24 @@ function renderDossierHtml(d: any) {
         const meta = t.meta || {};
         const refs = Array.isArray(meta.references) ? meta.references : [];
         return `<li>
-          <b>[${t.completed ? 'x' : ' '}]</b> ${esc(t.title)} ${t.critical ? '<b style="color:#b91c1c">(crítico)</b>' : ''}
+          <b>[${t.completed ? 'x' : ' '}]</b> ${esc(t.title)} ${t.critical ? '<b style="color:#b91c1c">(crÃ­tico)</b>' : ''}
           <div class="muted">${esc(t.description || '')}</div>
           ${t.notes ? `<div class="muted">Nota: ${esc(t.notes)}</div>` : ''}
-          <div class="muted">Evidências: <b>${ev.length}</b> • Cálculos: <b>${ca.length}</b>${t.critical && !t.satisfied ? ` • <b style="color:#b91c1c">pendente</b>` : ''}</div>
+          <div class="muted">EvidÃªncias: <b>${ev.length}</b> â€¢ CÃ¡lculos: <b>${ca.length}</b>${t.critical && !t.satisfied ? ` â€¢ <b style="color:#b91c1c">pendente</b>` : ''}</div>
           ${t.critical && !t.satisfied ? `<div class="muted">Faltando: ${[
             (!t.completed ? 'marcar como feito' : null),
-            (t.missing?.projectData ? 'dados mínimos' : null),
-            (t.missing?.evidence ? 'evidência' : null),
-            (t.missing?.calculation ? 'cálculo' : null)
+            (t.missing?.projectData ? 'dados mÃ­nimos' : null),
+            (t.missing?.evidence ? 'evidÃªncia' : null),
+            (t.missing?.calculation ? 'cÃ¡lculo' : null)
           ].filter(Boolean).map(esc).join(', ')}</div>` : ''}
-          ${refs.length ? `<div class="muted">Referências: ${refs.map((r:any)=>r.url?`<a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.title)}</a>`:esc(r.title)).join(' • ')}</div>` : ''}
+          ${refs.length ? `<div class="muted">ReferÃªncias: ${refs.map((r:any)=>r.url?`<a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.title)}</a>`:esc(r.title)).join(' â€¢ ')}</div>` : ''}
         </li>`;
       }).join('')}</ul>`;
     }).join('')}
   </div>
 
   <div class="card"><h2>Tabela de rastreabilidade</h2>
-    <p class="muted">Relação direta entre checklist → evidências → cálculos (apoio à auditoria e ao RAC).</p>
+    <p class="muted">RelaÃ§Ã£o direta entre checklist â†’ evidÃªncias â†’ cÃ¡lculos (apoio Ã  auditoria e ao RAC).</p>
     <table style="width:100%;border-collapse:collapse">
       <thead>
         <tr>
@@ -950,18 +962,18 @@ function renderDossierHtml(d: any) {
         ${(d.tasks || []).filter((t:any)=>t.active!==false).map((t:any)=>{
           const ev = evidByTask[t.id] || [];
           const ca = calcsByTask[t.id] || [];
-          const st = (t.satisfied || (!t.critical && t.completed)) ? 'OK' : (t.critical ? 'PENDENTE' : '—');
+          const st = (t.satisfied || (!t.critical && t.completed)) ? 'OK' : (t.critical ? 'PENDENTE' : 'â€”');
           const stCls = st === 'OK' ? 'green' : (st === 'PENDENTE' ? 'red' : 'yellow');
           return `
             <tr>
               <td style="padding:6px;border-bottom:1px solid #f1f5f9" class="muted">${esc(t.stage)}</td>
               <td style="padding:6px;border-bottom:1px solid #f1f5f9">
                 <b>${esc(t.title)}</b>
-                ${t.critical ? ' <span class="badge red">crítico</span>' : ''}
+                ${t.critical ? ' <span class="badge red">crÃ­tico</span>' : ''}
                 ${(ev.length || ca.length) ? `<div class="muted" style="margin-top:4px">${
                   [
-                    ev.length ? `Evidências: ${ev.slice(0,3).map((e:any)=>esc(e.title)).join(' • ')}${ev.length>3?' …':''}` : null,
-                    ca.length ? `Cálculos: ${ca.slice(0,2).map((c:any)=>esc(c.calc_type)).join(' • ')}${ca.length>2?' …':''}` : null,
+                    ev.length ? `EvidÃªncias: ${ev.slice(0,3).map((e:any)=>esc(e.title)).join(' â€¢ ')}${ev.length>3?' â€¦':''}` : null,
+                    ca.length ? `CÃ¡lculos: ${ca.slice(0,2).map((c:any)=>esc(c.calc_type)).join(' â€¢ ')}${ca.length>2?' â€¦':''}` : null,
                   ].filter(Boolean).join(' | ')
                 }</div>` : ''}
               </td>
@@ -975,23 +987,23 @@ function renderDossierHtml(d: any) {
   </div>
 
   <div class="card"><h2>Calculadoras</h2><ul>
-    ${d.calculations.map((c:any)=>`<li><b>${esc(c.calc_type)}</b> ${c.task_title ? `<span class="muted">• ligado a: ${esc(c.task_title)}</span>` : ''} <span class="muted">• ${esc(c.created_at)}</span><div class="muted"><code>${esc(c.result_json)}</code></div></li>`).join('') || '<li class="muted">Sem cálculos registrados.</li>'}
+    ${d.calculations.map((c:any)=>`<li><b>${esc(c.calc_type)}</b> ${c.task_title ? `<span class="muted">â€¢ ligado a: ${esc(c.task_title)}</span>` : ''} <span class="muted">â€¢ ${esc(c.created_at)}</span><div class="muted"><code>${esc(c.result_json)}</code></div></li>`).join('') || '<li class="muted">Sem cÃ¡lculos registrados.</li>'}
   </ul></div>
 
-  <div class="card"><h2>Evidências</h2><ul>
+  <div class="card"><h2>EvidÃªncias</h2><ul>
     ${d.evidences.map((e:any)=>{
       const type = esc(e.evidence_type || 'link');
-      const rac = e.rac_section ? ` <span class="muted">• RAC: ${esc(e.rac_section)}</span>` : '';
+      const rac = e.rac_section ? ` <span class="muted">â€¢ RAC: ${esc(e.rac_section)}</span>` : '';
       const main = (e.evidence_type === 'text')
-        ? `<div class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(String(e.content_text||'').slice(0,1200))}${String(e.content_text||'').length>1200?'…':''}</div>`
-        : ` — <a href="${esc(e.url)}" target="_blank" rel="noreferrer">${esc(e.url)}</a>`;
-      return `<li><span class="muted">(${esc(e.stage)})</span> <b>${esc(e.title)}</b>${e.task_title ? ` <span class="muted">• ligado a: ${esc(e.task_title)}</span>` : ''} <span class="muted">• tipo: ${type}</span>${rac}${main}${e.notes ? `<div class="muted">Nota: ${esc(e.notes)}</div>`:''}</li>`;
-    }).join('') || '<li class="muted">Sem evidências registradas.</li>'}
+        ? `<div class="muted" style="white-space:pre-wrap;margin-top:6px">${esc(String(e.content_text||'').slice(0,1200))}${String(e.content_text||'').length>1200?'â€¦':''}</div>`
+        : ` â€” <a href="${esc(e.url)}" target="_blank" rel="noreferrer">${esc(e.url)}</a>`;
+      return `<li><span class="muted">(${esc(e.stage)})</span> <b>${esc(e.title)}</b>${e.task_title ? ` <span class="muted">â€¢ ligado a: ${esc(e.task_title)}</span>` : ''} <span class="muted">â€¢ tipo: ${type}</span>${rac}${main}${e.notes ? `<div class="muted">Nota: ${esc(e.notes)}</div>`:''}</li>`;
+    }).join('') || '<li class="muted">Sem evidÃªncias registradas.</li>'}
   </ul></div>
 
   <div class="card"><h2>Disclaimers</h2>
-    <p class="muted">Este dossiê é um guia de preparação. As referências são indicadas para apoiar o preenchimento e a organização do projeto, sem reproduzir conteúdo normativo.</p>
-    <p class="muted">A emissão oficial da ENCE segue o processo institucional aplicável (por exemplo, via OIA), conforme orientações do PBE Edifica.</p>
+    <p class="muted">Este dossiÃª Ã© um guia de preparaÃ§Ã£o. As referÃªncias sÃ£o indicadas para apoiar o preenchimento e a organizaÃ§Ã£o do projeto, sem reproduzir conteÃºdo normativo.</p>
+    <p class="muted">A emissÃ£o oficial da ENCE segue o processo institucional aplicÃ¡vel (por exemplo, via OIA), conforme orientaÃ§Ãµes do PBE Edifica.</p>
   </div>
   </body></html>`;
 }

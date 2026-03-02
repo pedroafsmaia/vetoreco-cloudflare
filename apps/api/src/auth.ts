@@ -43,7 +43,24 @@ export async function authRoutes(app: any) {
       await repo.audit(u.id, 'auth.register');
       return c.json(ok(requestId, { user: u }), 201);
     } catch (e: any) {
-      return c.json(err(requestId, 'REGISTER_FAILED', 'Não foi possível cadastrar. Email pode já existir.', { message: e?.message }), 400);
+      const message = String(e?.message || '');
+      const lower = message.toLowerCase();
+      const isDuplicateEmail =
+        lower.includes('unique') ||
+        lower.includes('constraint') ||
+        lower.includes('already exists');
+
+      if (isDuplicateEmail) {
+        return c.json(err(requestId, 'EMAIL_ALREADY_EXISTS', 'Este email já está cadastrado.'), 409);
+      }
+
+      console.error(JSON.stringify({
+        level: 'error',
+        requestId,
+        route: '/auth/register',
+        message,
+      }));
+      return c.json(err(requestId, 'REGISTER_FAILED', 'Não foi possível cadastrar no momento.'), 500);
     }
   });
 
@@ -70,7 +87,8 @@ export async function authRoutes(app: any) {
     const cookie = cookieSerialize(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: secureCookie,
-      sameSite: 'Lax',
+      // Frontend (pages.dev) and API (workers.dev) are cross-site; cookie must be SameSite=None.
+      sameSite: 'None',
       maxAge: days * 24 * 60 * 60
     });
     c.header('Set-Cookie', cookie);
@@ -88,7 +106,7 @@ export async function authRoutes(app: any) {
     }
     const secureCookie = (String(c.env.COOKIE_SECURE || '').toLowerCase() === 'true')
       || String(c.req.url || '').startsWith('https://');
-    const cookie = cookieSerialize(SESSION_COOKIE, '', { httpOnly: true, secure: secureCookie, sameSite: 'Lax', maxAge: 0 });
+    const cookie = cookieSerialize(SESSION_COOKIE, '', { httpOnly: true, secure: secureCookie, sameSite: 'None', maxAge: 0 });
     c.header('Set-Cookie', cookie);
     return c.json(ok(requestId, { ok: true }));
   });

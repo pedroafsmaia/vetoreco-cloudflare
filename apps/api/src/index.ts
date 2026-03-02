@@ -45,6 +45,14 @@ app.use('*', async (c, next) => {
 app.onError((e: any, c) => {
   const rid = c.get('requestId') || reqId();
   const url = new URL(c.req.url);
+  const status = Number.isInteger(e?.status) ? Number(e.status) : 500;
+  const code = typeof e?.code === 'string' ? e.code : 'INTERNAL_ERROR';
+  const safeMessage =
+    status >= 500
+      ? 'Erro interno. Se persistir, contate o suporte com o ID da requisição.'
+      : (typeof e?.message === 'string' && e.message.trim()
+          ? e.message
+          : 'Requisição inválida.');
   console.error(JSON.stringify({
     level: 'error',
     requestId: rid,
@@ -54,7 +62,7 @@ app.onError((e: any, c) => {
     stack: e?.stack,
   }));
   c.header('X-Request-Id', rid);
-  return c.json(err(rid, 'INTERNAL_ERROR', 'Erro interno. Se persistir, contate o suporte com o ID da requisiÃ§Ã£o.'), 500);
+  return c.json(err(rid, code, safeMessage, status < 500 ? e?.details : undefined), status);
 });
 
 app.notFound((c) => {

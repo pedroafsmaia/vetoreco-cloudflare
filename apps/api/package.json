@@ -6,13 +6,16 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build": "echo \"Workers build handled by wrangler\"",
-    "test": "node --import tsx --test ./test/**/*.test.ts"
+    "test": "npm run test:node && npm run test:vitest",
+    "test:node": "node --import tsx --test ./test/contract.test.ts ./test/dossier_cache.test.ts",
+    "test:vitest": "npx vitest run ./test/auth.integration.test.ts ./test/calculation.pipeline.test.ts ./test/regulatory.engine.test.ts ./test/technical-inputs.test.ts"
   },
   "dependencies": {
     "hono": "^4.5.0",
     "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
   }
 }

@@ -62,3 +62,30 @@ export function randomSaltB64(len = 16) {
   const bytes = crypto.getRandomValues(new Uint8Array(len));
   return btoa(String.fromCharCode(...bytes));
 }
+
+export function isIsoDate(value: string): boolean {
+  // YYYY-MM-DD strict format used by protocol/legal framing fields.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const t = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(t)) return false;
+  const d = new Date(t);
+  const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
+  const mm = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = d.getUTCDate().toString().padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}` === value;
+}
+
+export function assert(
+  condition: unknown,
+  status: number,
+  code: string,
+  message: string,
+  details?: unknown,
+): asserts condition {
+  if (condition) return;
+  const error = new Error(message) as Error & { status?: number; code?: string; details?: unknown };
+  error.status = status;
+  error.code = code;
+  error.details = details;
+  throw error;
+}

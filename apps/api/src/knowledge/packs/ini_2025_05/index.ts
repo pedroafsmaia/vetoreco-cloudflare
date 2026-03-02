@@ -407,11 +407,20 @@ export const RES_EXTRA: TaskTemplate[] = [
       why: 'Mudanças de marca/modelo sem registro atrapalham a inspeção do construído e geram pedido de complementação.',
       how: 'Anexe ficha técnica final, fotos e notas fiscais/ordens de compra quando disponíveis.',
       evidenceHints: ['Ficha técnica final', 'Fotos do equipamento instalado', 'NF/ordem de compra'],
-      acceptanceCriteria: ['Evidências anexadas e vinculadas ao item'],
-      fileNamingHints: ['05_Construido/AguaQuente/Ficha_Final.pdf', '05_Construido/AguaQuente/Fotos_Instalacao.jpg'],
+      acceptanceCriteria: [
+        'Evidências anexadas e vinculadas ao item',
+        'As-built anexado',
+        'Fotos e fichas finais anexadas',
+        'Mudanças registradas e justificadas',
+      ],
+      fileNamingHints: [
+        '05_Construido/AguaQuente/Ficha_Final.pdf',
+        '05_Construido/AguaQuente/Fotos_Instalacao.jpg',
+        '05_Construido/AsBuilt/Plantas_AsBuilt.pdf',
+        '05_Construido/Evidencias/Fotos_Envoltoria.zip',
+        '05_Construido/Evidencias/Fichas_Finais.pdf',
+      ],
       evidenceRequired: true,
-      acceptanceCriteria: ['As-built anexado', 'Fotos e fichas finais anexadas', 'Mudanças registradas e justificadas'],
-      fileNamingHints: ['05_Construido/AsBuilt/Plantas_AsBuilt.pdf', '05_Construido/Evidencias/Fotos_Envoltoria.zip', '05_Construido/Evidencias/Fichas_Finais.pdf'],
       references: [ref('Manual do RAC — inspeção do construído', RAC_PDF, 'Inspeção do Construído')],
     },
   },
@@ -616,4 +625,3 @@ export const PACK_OVERVIEW = {
   submission_pack_examples: SUBMISSION_PACK_EXAMPLES,
   memorial_templates: MEMORIAL_TEMPLATES,
 };
-

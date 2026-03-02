@@ -3,7 +3,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-02-01",
   "vars": {
-    "APP_ORIGIN": "https://vetoreco.pages.dev",
+    "APP_ORIGIN": "https://vetoreco.pages.dev,https://vetoreco-web.pages.dev",
     "SESSION_DAYS": "14",
     "COOKIE_SECURE": "true"
   },

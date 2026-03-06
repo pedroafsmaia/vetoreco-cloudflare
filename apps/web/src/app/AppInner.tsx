@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Routes, Route, useNavigate } from 'react-router-dom';
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api';
 import type { User } from '../lib/types';
 import { AppShell } from './AppShell';
@@ -9,7 +9,9 @@ import ProjectPage from '../features/project/ProjectPage';
 
 export default function AppInner() {
   const [user, setUser] = useState<User | null>(null);
+  const [projectName, setProjectName] = useState<string | undefined>(undefined);
   const nav = useNavigate();
+  const location = useLocation();
 
   async function loadMe() {
     try {
@@ -24,6 +26,12 @@ export default function AppInner() {
     loadMe();
   }, []);
 
+  useEffect(() => {
+    if (!location.pathname.startsWith('/projects/')) {
+      setProjectName(undefined);
+    }
+  }, [location.pathname]);
+
   async function logout() {
     await api('/auth/logout', { method: 'POST', body: '{}' });
     setUser(null);
@@ -31,7 +39,7 @@ export default function AppInner() {
   }
 
   return (
-    <AppShell user={user} onLogout={logout}>
+    <AppShell user={user} onLogout={logout} projectName={projectName}>
       {!user ? (
         <AuthPage
           onAuthed={(u) => {
@@ -42,7 +50,7 @@ export default function AppInner() {
       ) : (
         <Routes>
           <Route path="/" element={<ProjectsPage />} />
-          <Route path="/projects/:id" element={<ProjectPage />} />
+          <Route path="/projects/:id" element={<ProjectPage onProjectLoaded={setProjectName} />} />
         </Routes>
       )}
     </AppShell>

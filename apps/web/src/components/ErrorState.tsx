@@ -1,4 +1,5 @@
 import React from 'react';
+import { Alert } from '../ui';
 
 export function ErrorState({
   message,
@@ -8,13 +9,13 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   return (
-    <div style={{ padding: 16 }}>
-      <div style={{ marginBottom: 12, color: '#b91c1c' }}>{message}</div>
-      {onRetry ? (
-        <button onClick={onRetry} style={{ padding: '8px 12px' }}>
+    <Alert variant="error" title="Erro">
+      <p>{message}</p>
+      {onRetry && (
+        <button className="btn btn-sm" onClick={onRetry} style={{ marginTop: 8 }}>
           Tentar novamente
         </button>
-      ) : null}
-    </div>
+      )}
+    </Alert>
   );
 }

@@ -1683,3 +1683,35 @@ tbody tr:hover {
     scroll-behavior: auto !important;
   }
 }
+
+
+/* ------------------------------------------------------------
+   AUTH PAGE
+   ------------------------------------------------------------ */
+.auth-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: var(--sp-4);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+}
+
+.auth-heading {
+  margin-bottom: var(--sp-4);
+  text-align: center;
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: var(--sp-3);
+}
+
+.auth-toggle {
+  margin-top: var(--sp-4);
+  text-align: center;
+}

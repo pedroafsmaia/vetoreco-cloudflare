@@ -1,9 +1,10 @@
 import React from 'react';
+import { Spinner } from '../ui';
 
 export function Loading({ label = 'Carregando...' }: { label?: string }) {
   return (
-    <div style={{ padding: 16, opacity: 0.8 }}>
-      <div>{label}</div>
+    <div className="loading-container" role="status" aria-live="polite">
+      <Spinner label={label} />
     </div>
   );
 }

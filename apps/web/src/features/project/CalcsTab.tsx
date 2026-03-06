@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../api';
 import { formatApiError } from '../../lib/errors';
-import { Card } from '../../ui';
+import { Card, Modal } from '../../ui';
 
 type CalcType = 'u_value' | 'wwr' | 'wwr_facades' | 'avs' | 'lpd' | 'lpd_spaces';
 type DpilLevel = 'A' | 'B' | 'C' | 'D';
@@ -36,6 +36,7 @@ export default function CalcsTab({ projectId, calcs, onChange, prefill, onPrefil
   const [dpil, setDpil] = useState<any>(null);
   const [dpilFunc, setDpilFunc] = useState('');
   const [dpilLevel, setDpilLevel] = useState<DpilLevel>('A');
+  const [showResetModal, setShowResetModal] = useState(false);
 
   useEffect(() => {
     setErrMsg(''); setResult(null);
@@ -83,6 +84,14 @@ export default function CalcsTab({ projectId, calcs, onChange, prefill, onPrefil
     } catch (e: any) {
       setErrMsg(formatApiError(e, 'Erro no cálculo.'));
     }
+  }
+
+  function confirmResetCalc() {
+    setResult(null);
+    setErrMsg('');
+    setTaskId(undefined);
+    setType('u_value');
+    setShowResetModal(false);
   }
 
   const currentLPD = (() => {
@@ -236,7 +245,10 @@ export default function CalcsTab({ projectId, calcs, onChange, prefill, onPrefil
 
         {errMsg && <div className="error">{errMsg}</div>}
         {taskId ? <div className="muted">Vinculado a uma tarefa do checklist.</div> : <div className="muted">Dica: abra a calculadora a partir de uma tarefa para vincular automaticamente.</div>}
-        <button className="btn primary" aria-label="Salvar cálculo" onClick={run}>Salvar cálculo</button>
+        <div className="row mt-sm">
+          <button className="btn primary" aria-label="Salvar cálculo" onClick={run}>Salvar cálculo</button>
+          <button className="btn" aria-label="Reiniciar cálculo" onClick={() => setShowResetModal(true)}>Reiniciar</button>
+        </div>
 
         {result && (
           <div className="resultBox">
@@ -245,6 +257,14 @@ export default function CalcsTab({ projectId, calcs, onChange, prefill, onPrefil
           </div>
         )}
       </Card>
+
+      <Modal open={showResetModal} onClose={() => setShowResetModal(false)} title="Reiniciar cálculo" size="sm">
+        <p>Tem certeza que deseja reiniciar o cálculo? Os dados do formulário e o resultado atual serão limpos.</p>
+        <div className="row mt-sm">
+          <button className="btn primary" onClick={confirmResetCalc}>Confirmar</button>
+          <button className="btn" onClick={() => setShowResetModal(false)}>Cancelar</button>
+        </div>
+      </Modal>
 
       <Card variant="sub">
         <h3>Histórico</h3>

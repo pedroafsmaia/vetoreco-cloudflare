@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../../api';
-import { Card, Alert, Badge, ProgressBar } from '../../ui';
+import { Card, Alert, Badge, ProgressBar, Modal } from '../../ui';
 
 interface Task {
   id: string;
@@ -86,6 +86,7 @@ export default function JourneyTab({ projectId, journey, onChange, onAddEvidence
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [stageErr, setStageErr] = useState('');
   const [showInactive, setShowInactive] = useState(false);
+  const [showResetStageModal, setShowResetStageModal] = useState(false);
 
   const grouped: Record<string, Task[]> = {};
   for (const t of journey.tasks) (grouped[t.stage] = grouped[t.stage] || []).push(t);
@@ -120,6 +121,18 @@ export default function JourneyTab({ projectId, journey, onChange, onAddEvidence
     }
   }
 
+  async function confirmResetStage() {
+    setStageErr('');
+    try {
+      await api(`/projects/${projectId}/stage/reset`, { method: 'POST' });
+      setShowResetStageModal(false);
+      onStageChanged();
+    } catch (e: any) {
+      setStageErr(e?.error?.message || 'Não foi possível reiniciar a etapa.');
+      setShowResetStageModal(false);
+    }
+  }
+
   const msg = journey.readiness?.upToCurrentStage?.message || 'Siga a jornada para reduzir retrabalho.';
 
   return (
@@ -151,11 +164,13 @@ export default function JourneyTab({ projectId, journey, onChange, onAddEvidence
             <div className="row mt-sm">
               <button className="btn" disabled>Avançar</button>
               <button className="btn" onClick={() => advance(true)}>Avançar mesmo assim</button>
+              <button className="btn" onClick={() => setShowResetStageModal(true)}>Reiniciar etapa</button>
             </div>
           </Alert>
         ) : (
           <div className="row mt-sm">
             <button className="btn" onClick={() => advance(false)} disabled={!journey.stage.next}>Avançar etapa</button>
+            <button className="btn" onClick={() => setShowResetStageModal(true)} disabled={journey.stage.current === 'study'}>Reiniciar etapa</button>
           </div>
         )}
         {stageErr && <div className="error mt-sm">{stageErr}</div>}
@@ -311,6 +326,14 @@ export default function JourneyTab({ projectId, journey, onChange, onAddEvidence
           </ul>
         </div>
       ))}
+
+      <Modal open={showResetStageModal} onClose={() => setShowResetStageModal(false)} title="Reiniciar etapa" size="sm">
+        <p>Tem certeza que deseja reiniciar a etapa? O projeto voltará para a etapa <b>Estudo</b>.</p>
+        <div className="row mt-sm">
+          <button className="btn primary" onClick={confirmResetStage}>Confirmar</button>
+          <button className="btn" onClick={() => setShowResetStageModal(false)}>Cancelar</button>
+        </div>
+      </Modal>
     </div>
   );
 }

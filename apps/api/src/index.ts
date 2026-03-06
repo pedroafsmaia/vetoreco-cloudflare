@@ -355,7 +355,7 @@ app.post('/projects/:id/stage/reset', requireAuth, async (c) => {
   if (!project) return c.json(err(requestId, 'NOT_FOUND', 'Projeto não encontrado.'), 404);
   const firstStage = STAGE_ORDER[0];
   if (project.stage_current === firstStage) {
-    return c.json(err(requestId, 'ALREADY_FIRST', 'O projeto já está na primeira etapa.'), 409);
+    return c.json(ok(requestId, { project }));
   }
   await repo.updateProject(c.get('userId'), c.req.param('id'), { stage_current: firstStage });
   await repo.audit(c.get('userId'), 'project.stage.reset', c.req.param('id'), { previousStage: project.stage_current, newStage: firstStage });

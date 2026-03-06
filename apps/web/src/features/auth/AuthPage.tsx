@@ -71,7 +71,7 @@ function AuthPage({ onAuthed }: { onAuthed: (u: User) => void }) {
               id="auth-password"
               type="password"
               required
-              autoComplete="current-password"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="mínimo 8 caracteres"
